@@ -7,9 +7,27 @@ interface WebSocketMessage {
 }
 
 // Connect to same host:port when served by bot, or port 3001 for dev
-const WS_URL = window.location.port === '5173'
+const WS_BASE = window.location.port === '5173'
   ? `ws://${window.location.hostname}:3001`
   : `ws://${window.location.host}`;
+
+// Optional shared secret: open the dashboard once with ?token=<DASHBOARD_TOKEN>,
+// it is then remembered for the browser session.
+function resolveToken(): string | null {
+  try {
+    const fromUrl = new URLSearchParams(window.location.search).get('token');
+    if (fromUrl) {
+      sessionStorage.setItem('dashboardToken', fromUrl);
+      return fromUrl;
+    }
+    return sessionStorage.getItem('dashboardToken');
+  } catch {
+    return null;
+  }
+}
+
+const TOKEN = resolveToken();
+const WS_URL = TOKEN ? `${WS_BASE}/?token=${encodeURIComponent(TOKEN)}` : WS_BASE;
 const MAX_LOGS = 200;
 
 export function useWebSocket() {

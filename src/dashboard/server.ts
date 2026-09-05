@@ -1,6 +1,16 @@
 /**
- * Dashboard Server - Express + WebSocket server for real-time monitoring
- * 
+ * Dashboard Server - HTTP + WebSocket server for real-time monitoring
+ *
+ * Security model:
+ * - Binds to 127.0.0.1 by default (override with DASHBOARD_HOST, e.g. 0.0.0.0
+ *   only if you also put an authenticated reverse proxy in front of it).
+ * - CORS is limited to loopback origins; the wildcard was removed.
+ * - WebSocket upgrades from a browser are only accepted when the Origin header
+ *   is a loopback origin. This blocks any web page you happen to have open
+ *   from sending commands (switch to LIVE, sell positions...) to the bot.
+ * - Optionally require a shared secret: set DASHBOARD_TOKEN and open the
+ *   dashboard with `?token=<value>` (the client stores it in sessionStorage).
+ *
  * Usage:
  *   import { startDashboard } from './src/dashboard/server.js';
  *   startDashboard(3001);
@@ -20,6 +30,39 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 let server: http.Server | null = null;
 let wss: WebSocketServer | null = null;
 
+const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]', '::1']);
+
+/** True when `origin` (an Origin header value) points at this machine. */
+export function isLoopbackOrigin(origin: string | undefined): boolean {
+  if (!origin) return false;
+  try {
+    const url = new URL(origin);
+    return LOOPBACK_HOSTS.has(url.hostname) || LOOPBACK_HOSTS.has(url.host.split(':')[0]);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Decide whether a WebSocket upgrade may proceed.
+ * - Non-browser clients (no Origin header) are accepted; they are already on
+ *   the loopback interface when DASHBOARD_HOST is left at its default.
+ * - Browser clients must come from a loopback origin.
+ * - When DASHBOARD_TOKEN is set, every client must present it.
+ */
+export function isUpgradeAllowed(
+  origin: string | undefined,
+  url: string | undefined,
+  requiredToken: string | undefined,
+): boolean {
+  if (origin !== undefined && !isLoopbackOrigin(origin)) return false;
+  if (requiredToken) {
+    const params = new URL(url || '/', 'http://localhost').searchParams;
+    if (params.get('token') !== requiredToken) return false;
+  }
+  return true;
+}
+
 function broadcast(message: WebSocketMessage): void {
   if (!wss) return;
   const data = JSON.stringify(message);
@@ -30,12 +73,21 @@ function broadcast(message: WebSocketMessage): void {
   });
 }
 
-export function startDashboard(port = 3001): http.Server {
+export function startDashboard(
+  port = 3001,
+  host = process.env.DASHBOARD_HOST || '127.0.0.1',
+): http.Server {
+  const requiredToken = process.env.DASHBOARD_TOKEN || undefined;
+
   server = http.createServer((req, res) => {
-    // CORS headers
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+    // CORS: only loopback origins, never a wildcard
+    const origin = req.headers.origin;
+    if (isLoopbackOrigin(origin)) {
+      res.setHeader('Access-Control-Allow-Origin', origin as string);
+      res.setHeader('Vary', 'Origin');
+      res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
+      res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+    }
 
     if (req.method === 'OPTIONS') {
       res.writeHead(204);
@@ -76,6 +128,12 @@ export function startDashboard(port = 3001): http.Server {
       return;
     }
 
+    if (url.pathname === '/api/history/summary') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(getHistorySummary()));
+      return;
+    }
+
     if (url.pathname.startsWith('/api/history/')) {
       const sessionId = url.pathname.replace('/api/history/', '');
       const session = getSession(sessionId);
@@ -95,12 +153,12 @@ export function startDashboard(port = 3001): http.Server {
       return;
     }
 
-    // Serve static files from dashboard/dist
+    // Serve static files from dashboard/dist (path-traversal safe)
     const distPath = path.resolve(__dirname, '../../dashboard/dist');
-    let filePath = path.join(distPath, url.pathname === '/' ? 'index.html' : url.pathname);
+    const requested = path.normalize(url.pathname === '/' ? 'index.html' : url.pathname).replace(/^(\.\.[/\\])+/, '');
+    const filePath = path.join(distPath, requested);
 
-    // Check if file exists
-    if (fs.existsSync(filePath) && fs.statSync(filePath).isFile()) {
+    if (filePath.startsWith(distPath) && fs.existsSync(filePath) && fs.statSync(filePath).isFile()) {
       const ext = path.extname(filePath);
       const mimeTypes: Record<string, string> = {
         '.html': 'text/html',
@@ -130,7 +188,16 @@ export function startDashboard(port = 3001): http.Server {
     res.end(JSON.stringify({ error: 'Not found' }));
   });
 
-  wss = new WebSocketServer({ server });
+  wss = new WebSocketServer({
+    server,
+    verifyClient: (info: { origin: string; req: http.IncomingMessage }) => {
+      const allowed = isUpgradeAllowed(info.origin || undefined, info.req.url, requiredToken);
+      if (!allowed) {
+        console.warn(`[Dashboard] Rejected WebSocket from origin=${info.origin || 'n/a'} ip=${info.req.socket.remoteAddress}`);
+      }
+      return allowed;
+    },
+  });
 
   wss.on('connection', (ws) => {
     console.log('[Dashboard] Client connected');
@@ -145,9 +212,9 @@ export function startDashboard(port = 3001): http.Server {
     ws.on('message', (data) => {
       try {
         const message = JSON.parse(data.toString());
-        if (message.type === 'command') {
+        if (message && message.type === 'command' && typeof message.command === 'string') {
           console.log(`[Dashboard] Command received: ${message.command}`, message.payload);
-          dashboardEmitter.emit('command', { command: message.command, payload: message.payload });
+          dashboardEmitter.emit('command', { command: message.command, payload: message.payload ?? {} });
         }
       } catch (e) {
         console.error('[Dashboard] Failed to parse message:', e);
@@ -176,9 +243,13 @@ export function startDashboard(port = 3001): http.Server {
     broadcast({ type: 'config', payload: config });
   });
 
-  server.listen(port, () => {
-    console.log(`[Dashboard] Server running at http://localhost:${port}`);
-    console.log(`[Dashboard] WebSocket at ws://localhost:${port}`);
+  server.listen(port, host, () => {
+    const displayHost = host === '0.0.0.0' || host === '::' ? 'localhost' : host;
+    console.log(`[Dashboard] Server running at http://${displayHost}:${port} (bound to ${host})`);
+    console.log(`[Dashboard] WebSocket at ws://${displayHost}:${port}`);
+    if (host !== '127.0.0.1' && host !== 'localhost' && host !== '::1') {
+      console.warn('[Dashboard] WARNING: dashboard is reachable from other machines. Set DASHBOARD_TOKEN or put it behind an authenticated proxy.');
+    }
   });
 
   return server;

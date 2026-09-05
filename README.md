@@ -291,11 +291,24 @@ The bot comes with 4 powerful strategies. You can toggle them ON/OFF in the dash
 ## 9. Safety & Risks
 
 ### ✅ Built-in Safety Features (v3.1)
-1. **Multi-Layer Limits**: 4 levels of automatic protection
-2. **Quality Trader Filtering**: Only follow proven, consistent traders
-3. **Position Size Limits**: Maximum 5% per trade, adapts to performance
+1. **Multi-Layer Limits**: 4 levels of automatic protection, fed with *realised* PnL (DipArb merge/exit, arbitrage, manual closes) and **persisted** in `data/risk-state.<mode>.json` so a pause or a permanent halt survives a restart. Delete that file to start over.
+2. **Quality Trader Filtering**: leaderboard wallets must pass win-rate / PnL / trade-count checks (profit factor and consistency checks exist only in `bot-config.ts`).
+3. **Position Size Limits**: copy trades are capped by `maxSizePerTrade` and by `capital.maxPerTradePct` (2% of `CAPITAL_USD`). Dynamic sizing is **not** implemented in `bot-with-dashboard.ts`.
 4. **Minimum Trade Values**: All positions can be exited (no stuck trades)
 5. **Permanent Halt**: Trading stops at 40% total loss
+
+### 🔒 Dashboard Security
+The dashboard can switch the bot to LIVE, sell positions and redeem. Therefore:
+- It binds to `127.0.0.1` only (`DASHBOARD_HOST`). Do not expose it without an authenticated proxy.
+- Browser connections are accepted from `localhost` origins only, so a random web page cannot send commands to the bot.
+- Optional shared secret: set `DASHBOARD_TOKEN=...` and open `http://localhost:3001/?token=...`.
+- The "Switch to LIVE" button is disabled unless `ALLOW_DASHBOARD_LIVE_TOGGLE=true`. The safe way to go live is to restart with `DRY_RUN=false`.
+
+### ⚠️ Known Limitations (read before going live)
+- **Dry run is not a backtest.** Arbitrage "profits" in dry run are estimates from the orderbook (counted once per minute per market), Smart Money and DipArb signals are logged with 0 profit. Use dry run to check that the bot sees signals, not to judge profitability.
+- **Opening trades record 0 PnL.** Copy trades and DipArb legs are recorded when opened; PnL is realised on DipArb merge/exit and on manual "Close position". Positions closed on polymarket.com are not tracked by the bot.
+- **Direct trading** is a naive Binance-trend prototype (5 vs 5 candles, 15m) with no stop-loss. Keep it disabled.
+- Two bot entry points exist (`bot-with-dashboard.ts` and `bot-config.ts`) with different logic. This guide only covers `bot-with-dashboard.ts`.
 
 ### ⚠️ Your Responsibilities
 1. **Private Keys**: Your key gives full access to your funds. Keep it safe.
