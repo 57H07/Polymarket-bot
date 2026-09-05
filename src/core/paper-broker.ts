@@ -223,8 +223,7 @@ export class PaperBroker {
 
       this.balance -= spent + fee;
       this.feesPaid += fee;
-      this.addShares(params.tokenId, shares, spent, { conditionId, outcome: meta?.outcome ?? '?', title: meta?.title, strategy });
-      const avgPrice = spent / shares;
+      this.addShares(params.tokenId, shares, spent + fee, { conditionId, outcome: meta?.outcome ?? '?', title: meta?.title, strategy });
       const fill = this.recordFill({
         kind: 'BUY', tokenId: params.tokenId, conditionId, outcome: meta?.outcome, strategy,
         shares, avgPrice, usdc: -(spent + fee), fee, gas: 0, realizedPnl: 0,
