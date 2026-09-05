@@ -32,3 +32,5 @@ coverage/
 .cache/
 *.tsbuildinfo
 .mcp.json
+# Bot runtime state (risk counters, session history)
+data/

@@ -20,7 +20,19 @@ import {
 import { CTFClient } from './src/clients/ctf-client.js';
 import { startDashboard, dashboardEmitter } from './src/dashboard/index.js';
 import type { BotState, BotConfig, LogLevel, DipArbSignal, SmartMoneySignal } from './src/dashboard/types.js';
-import { addSession, createSessionFromState, type TradeRecord } from './src/dashboard/session-history.js';
+import {
+  applyTrade,
+  createRiskState,
+  evaluateRisk,
+  loadRiskState,
+  saveRiskState,
+  type RiskConfig,
+  type RiskState,
+} from './src/core/risk-manager.js';
+import { dirname, join } from 'path';
+import { fileURLToPath } from 'url';
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
 
 // ============================================================================
 // CONFIGURATION (same as bot-config.ts)
@@ -139,6 +151,10 @@ let CONFIG = {
   dryRun: process.env.DRY_RUN !== 'false',
 };
 
+/** Switching to LIVE from the browser is opt-in: it must be enabled in .env. */
+const ALLOW_LIVE_TOGGLE = process.env.ALLOW_DASHBOARD_LIVE_TOGGLE || 'false';
+const TOGGLEABLE_STRATEGIES = new Set<keyof typeof CONFIG>(['smartMoney', 'arbitrage', 'dipArb', 'directTrading', 'binance']);
+
 // ============================================================================
 // STATE
 // ============================================================================
@@ -231,108 +247,125 @@ function updateDashboard() {
   dashboardEmitter.updateState(state);
 }
 
-// 🔴 FIXED: v3.1 Multi-layer risk management
-function canTrade(): boolean {
-  // Check if permanently halted
-  if (state.permanentlyHalted) {
-    log('ERROR', '🛑 Trading permanently halted - total loss limit reached');
-    return false;
-  }
+// ============================================================================
+// RISK MANAGEMENT (persisted, see src/core/risk-manager.ts)
+// ============================================================================
+//
+// Risk counters are kept in `risk`, mirrored into `state` for the dashboard,
+// and written to data/risk-state.<mode>.json after every change so that a
+// restart cannot lift a pause or a permanent halt. Dry-run and live keep
+// separate files so paper results never gate real trading.
 
-  // Reset daily PnL if new day
-  const daysSinceReset = (Date.now() - state.lastDailyReset) / (1000 * 60 * 60 * 24);
-  if (daysSinceReset >= 1) {
-    log('INFO', `Daily PnL reset. Previous day: $${state.dailyPnL.toFixed(2)}`);
-    state.dailyPnL = 0;
-    state.lastDailyReset = Date.now();
-  }
-
-  // Reset monthly PnL if new month
-  const daysSinceMonthStart = (Date.now() - state.monthStartTime) / (1000 * 60 * 60 * 24);
-  if (daysSinceMonthStart >= 30) {
-    log('INFO', `Monthly PnL reset. Previous month: $${state.monthlyPnL.toFixed(2)}`);
-    state.monthlyPnL = 0;
-    state.monthStartTime = Date.now();
-  }
-
-  // Update current capital and drawdown
-  state.currentCapital = CONFIG.capital.totalUsd + state.totalPnL;
-  if (state.currentCapital > state.peakCapital) {
-    state.peakCapital = state.currentCapital;
-  }
-  state.currentDrawdown = (state.peakCapital - state.currentCapital) / state.peakCapital;
-
-  // Check temporary pause
-  if (state.isPaused && Date.now() < state.pauseUntil) return false;
-  if (state.isPaused && Date.now() >= state.pauseUntil) {
-    state.isPaused = false;
-    log('INFO', 'Bot resumed after cooldown');
-    updateDashboard();
-  }
-
-  // Layer 1: Daily loss limit
-  const dailyLossLimit = CONFIG.capital.totalUsd * CONFIG.risk.dailyMaxLossPct;
-  if (state.dailyPnL <= -dailyLossLimit) {
-    state.isPaused = true;
-    state.pauseUntil = Date.now() + CONFIG.risk.pauseOnBreachMinutes * 60 * 1000;
-    log('WARN', `Daily loss limit breached: -$${Math.abs(state.dailyPnL).toFixed(2)} (limit: $${dailyLossLimit.toFixed(2)})`);
-    updateDashboard();
-    return false;
-  }
-
-  // Layer 2: Monthly loss limit
-  const monthlyLossLimit = CONFIG.capital.totalUsd * CONFIG.risk.monthlyMaxLossPct;
-  if (state.monthlyPnL <= -monthlyLossLimit) {
-    log('ERROR', `🛑 Monthly loss limit breached: -$${Math.abs(state.monthlyPnL).toFixed(2)} (limit: $${monthlyLossLimit.toFixed(2)})`);
-    state.isPaused = true;
-    state.pauseUntil = Date.now() + (30 * 24 * 60 * 60 * 1000);
-    updateDashboard();
-    return false;
-  }
-
-  // Layer 3: Drawdown from peak
-  if (state.currentDrawdown >= CONFIG.risk.maxDrawdownFromPeak) {
-    log('ERROR', `🛑 Maximum drawdown reached: ${(state.currentDrawdown * 100).toFixed(1)}%`);
-    state.isPaused = true;
-    state.pauseUntil = Date.now() + (7 * 24 * 60 * 60 * 1000);
-    updateDashboard();
-    return false;
-  }
-
-  // Layer 4: Total loss - PERMANENT HALT
-  const totalLossLimit = CONFIG.capital.totalUsd * CONFIG.risk.totalMaxLossPct;
-  if (state.totalPnL <= -totalLossLimit) {
-    state.permanentlyHalted = true;
-    log('ERROR', '💀 TOTAL LOSS LIMIT REACHED - TRADING PERMANENTLY HALTED');
-    log('ERROR', `Total loss: -$${Math.abs(state.totalPnL).toFixed(2)} (limit: $${totalLossLimit.toFixed(2)})`);
-    updateDashboard();
-    return false;
-  }
-
-  return true;
+function riskConfig(): RiskConfig {
+  return {
+    capitalUsd: CONFIG.capital.totalUsd,
+    dailyMaxLossPct: CONFIG.risk.dailyMaxLossPct,
+    monthlyMaxLossPct: CONFIG.risk.monthlyMaxLossPct,
+    maxDrawdownFromPeak: CONFIG.risk.maxDrawdownFromPeak,
+    totalMaxLossPct: CONFIG.risk.totalMaxLossPct,
+    maxConsecutiveLosses: CONFIG.risk.maxConsecutiveLosses,
+    pauseOnBreachMinutes: CONFIG.risk.pauseOnBreachMinutes,
+  };
 }
 
-// 🔴 FIXED: Enhanced trade recording with win tracking
-function recordTrade(profit: number, strategy: string) {
-  state.tradesExecuted++;
-  state.dailyPnL += profit;
-  state.monthlyPnL += profit;  // NEW
-  state.totalPnL += profit;
+function riskStatePath(dryRun: boolean): string {
+  return join(__dirname, 'data', `risk-state.${dryRun ? 'dry' : 'live'}.json`);
+}
 
-  // Track consecutive wins/losses
-  if (profit < 0) {
-    state.consecutiveLosses++;
-    state.consecutiveWins = 0;
-  } else {
-    state.consecutiveLosses = 0;
-    state.consecutiveWins++;
+let risk: RiskState = createRiskState(CONFIG.capital.totalUsd);
+
+function syncRiskToState() {
+  state.dailyPnL = risk.dailyPnL;
+  state.monthlyPnL = risk.monthlyPnL;
+  state.totalPnL = risk.totalPnL;
+  state.consecutiveLosses = risk.consecutiveLosses;
+  state.consecutiveWins = risk.consecutiveWins;
+  state.tradesExecuted = risk.tradesExecuted;
+  state.isPaused = risk.isPaused;
+  state.pauseUntil = risk.pauseUntil;
+  state.lastDailyReset = risk.lastDailyReset;
+  state.monthStartTime = risk.monthStartTime;
+  state.peakCapital = risk.peakCapital;
+  state.currentCapital = risk.currentCapital;
+  state.currentDrawdown = risk.currentDrawdown;
+  state.permanentlyHalted = risk.permanentlyHalted;
+}
+
+function persistRisk() {
+  try {
+    saveRiskState(riskStatePath(CONFIG.dryRun), risk, CONFIG.capital.totalUsd);
+  } catch (err) {
+    log('WARN', `Could not persist risk state: ${(err as Error).message}`);
   }
+}
+
+/** Load the risk state for the current mode (called at startup and on mode switch). */
+function loadRiskForCurrentMode() {
+  const file = riskStatePath(CONFIG.dryRun);
+  const loaded = loadRiskState(file);
+  if (loaded) {
+    risk = loaded.state;
+    const age = Math.round((Date.now() - loaded.savedAt) / 60000);
+    log('INFO', `Risk state restored from ${file} (saved ${age} min ago): total PnL $${risk.totalPnL.toFixed(2)}, paused=${risk.isPaused}, halted=${risk.permanentlyHalted}`);
+    if (loaded.capitalUsd !== CONFIG.capital.totalUsd) {
+      log('WARN', `CAPITAL_USD changed since last run ($${loaded.capitalUsd} → $${CONFIG.capital.totalUsd}). Loss limits are computed on the new value; delete ${file} to start fresh.`);
+    }
+  } else {
+    risk = createRiskState(CONFIG.capital.totalUsd);
+    log('INFO', `No risk state found for ${CONFIG.dryRun ? 'dry-run' : 'live'} mode, starting fresh`);
+  }
+  syncRiskToState();
+  updateDashboard();
+}
+
+function canTrade(): boolean {
+  const wasPaused = risk.isPaused;
+  const decision = evaluateRisk(risk, riskConfig());
+
+  for (const message of decision.messages) {
+    const level: LogLevel = decision.breach === 'total_loss' || decision.breach === 'permanent_halt'
+      ? 'ERROR'
+      : decision.breach ? 'WARN' : 'INFO';
+    log(level, message);
+  }
+
+  if (decision.breach === 'permanent_halt') {
+    // Already halted before this call - keep the log quiet (once per minute)
+    if (Date.now() - lastHaltLog > 60_000) {
+      log('ERROR', '🛑 Trading permanently halted - total loss limit reached');
+      lastHaltLog = Date.now();
+    }
+  }
+
+  if (decision.breach || decision.resumed || wasPaused !== risk.isPaused) {
+    syncRiskToState();
+    persistRisk();
+    updateDashboard();
+  } else {
+    syncRiskToState();
+  }
+
+  return decision.allowed;
+}
+let lastHaltLog = 0;
+
+/**
+ * Record a realised trade result. Pass the real profit (or loss) in USD.
+ * Pass 0 for an opening leg whose outcome is not yet known: it counts as a
+ * trade but does not move PnL or win/loss streaks.
+ */
+function recordTrade(profit: number, strategy: string) {
+  applyTrade(risk, profit);
 
   if (strategy === 'smartMoney') state.smartMoneyTrades++;
   else if (strategy === 'arbitrage') state.arbTrades++;
   else if (strategy === 'dipArb') state.dipArbTrades++;
   else if (strategy === 'direct') state.directTrades++;
 
+  syncRiskToState();
+  persistRisk();
+  // Re-evaluate immediately so a breach pauses the bot before the next signal
+  canTrade();
   updateDashboard();
 }
 
@@ -356,6 +389,8 @@ function simulateTrade(profit: number, strategy: string, description: string) {
 // ============================================================================
 
 let arbService: ArbitrageService | null = null;
+const simulatedArbAt = new Map<string, number>();
+const SIMULATED_ARB_COOLDOWN_MS = 60_000;
 let isSmartMoneyInitialized = false;
 let isSmartMoneyInitializing = false;
 
@@ -415,13 +450,12 @@ async function initializeSmartMoney(sdk: PolymarketSDK) {
   updateDashboard();
 
   if (qualified.length > 0) {
-    // Subscribe to smart money trades with address filter
+    // Subscribe to smart money trades. The address filter is essential:
+    // without it every trade on Polymarket would be reported as a signal.
     sdk.smartMoney.subscribeSmartMoneyTrades(
       async (trade: SmartMoneyTrade) => {
         if (!CONFIG.smartMoney.enabled) return;
-        if (!canTrade()) return;
 
-        // ... (inside setupSmartMoney callback)
         // Add to smart money signals for dashboard
         const signal: SmartMoneySignal = {
           id: `sm-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
@@ -445,19 +479,68 @@ async function initializeSmartMoney(sdk: PolymarketSDK) {
         });
         updateDashboard();
 
-        // EXECUTION LOGIC
+        if (!canTrade()) return;
+
+        const plan = planCopyTrade(trade);
+        if (!plan) return;
+
         if (CONFIG.dryRun) {
-          // ... execution
-          simulateTrade(0, 'smartMoney', `Smart Money Copy: ${trade.side} ${trade.size} shares @ ${trade.price}`);
-        } else {
-          // ... live execution
-          // simplified placeholder from original file
-          // ...
+          simulateTrade(0, 'smartMoney', `Smart Money Copy: ${trade.side} $${plan.usdcAmount.toFixed(2)} (${plan.shares.toFixed(2)} sh) @ ≤${plan.limitPrice.toFixed(3)} on ${trade.marketSlug || trade.conditionId}`);
+          return;
         }
-      });
+
+        try {
+          if (CONFIG.smartMoney.delay > 0) {
+            await new Promise(r => setTimeout(r, CONFIG.smartMoney.delay));
+          }
+          const res = await sdk.tradingService.createMarketOrder({
+            tokenId: plan.tokenId,
+            side: trade.side,
+            amount: plan.usdcAmount,
+            price: plan.limitPrice,
+            orderType: 'FOK',
+          });
+          if (res.success) {
+            // Opening a position: realised PnL is unknown until it is closed,
+            // so record the trade with 0 profit (does not touch streaks).
+            recordTrade(0, 'smartMoney');
+            log('TRADE', `✅ Copied ${trade.side} $${plan.usdcAmount.toFixed(2)} from ${trade.traderAddress.slice(0, 8)}... (order ${res.orderId || 'n/a'})`);
+          } else {
+            log('WARN', `❌ Copy trade failed: ${res.errorMsg || 'unknown error'}`);
+          }
+        } catch (err) {
+          log('WARN', `❌ Copy trade error: ${(err as Error).message}`);
+        }
+      },
+      { filterAddresses: qualified }
+    );
   }
   isSmartMoneyInitialized = true;
   isSmartMoneyInitializing = false;
+}
+
+/**
+ * Size a copy trade from the leader's trade. Mirrors SmartMoneyService.startAutoCopyTrading
+ * but runs after the risk gate. Returns null when the trade should be skipped.
+ */
+function planCopyTrade(trade: SmartMoneyTrade): { tokenId: string; usdcAmount: number; shares: number; limitPrice: number } | null {
+  const cfg = CONFIG.smartMoney;
+  if (!trade.tokenId || !(trade.price > 0) || !(trade.size > 0)) return null;
+
+  const leaderValue = trade.size * trade.price;
+  if (leaderValue < cfg.minTradeSize) return null;
+
+  let usdcAmount = leaderValue * cfg.sizeScale;
+  usdcAmount = Math.min(usdcAmount, cfg.maxSizePerTrade);
+  // Hard cap from capital config, whichever is lower
+  usdcAmount = Math.min(usdcAmount, CONFIG.capital.totalUsd * CONFIG.capital.maxPerTradePct);
+  if (usdcAmount < 1) return null; // Polymarket minimum order
+
+  const limitPrice = trade.side === 'BUY'
+    ? Math.min(0.99, trade.price * (1 + cfg.maxSlippage))
+    : Math.max(0.01, trade.price * (1 - cfg.maxSlippage));
+
+  return { tokenId: trade.tokenId, usdcAmount, shares: usdcAmount / trade.price, limitPrice };
 }
 
 
@@ -492,11 +575,18 @@ async function setupArbitrage(_sdk: PolymarketSDK) {
     log('ARB', `Opportunity: ${opp.type.toUpperCase()} +${opp.profitPercent.toFixed(2)}%`);
 
     // SIMULATION HOOK
+    // 'opportunity' fires on every orderbook update, so the same opportunity
+    // would be "earned" dozens of times. Count it once per market/type per
+    // execution cooldown, and only if the risk gate allows a trade.
     if (CONFIG.dryRun && opp.profitPercent > 0) {
-      // Conservative estimate: 10% of max size or min size
-      const size = Math.max(CONFIG.arbitrage.minTradeSize, 10);
-      const estimatedProfit = size * (opp.profitPercent / 100);
-      simulateTrade(estimatedProfit, 'arbitrage', `Arb ${opp.market}`);
+      const key = `${state.arbitrage.currentMarket || opp.market?.name || 'unknown'}:${opp.type}`;
+      const last = simulatedArbAt.get(key) || 0;
+      if (Date.now() - last >= SIMULATED_ARB_COOLDOWN_MS && canTrade()) {
+        simulatedArbAt.set(key, Date.now());
+        const size = Math.min(opp.recommendedSize || CONFIG.arbitrage.minTradeSize, CONFIG.arbitrage.maxTradeSize);
+        const estimatedProfit = size * (opp.profitPercent / 100);
+        simulateTrade(estimatedProfit, 'arbitrage', `Arb ${opp.type} ${opp.market?.name || ''} size $${size.toFixed(2)} (estimate, not a fill)`);
+      }
     }
 
     updateDashboard();
@@ -539,6 +629,9 @@ async function setupArbitrage(_sdk: PolymarketSDK) {
     }
   }
 }
+
+/** Per-round cost tracking so DipArb can report realised PnL on merge / exit. */
+const dipArbRounds = new Map<string, { leg1Cost: number; leg2Cost: number; shares: number }>();
 
 async function setupDipArb(sdk: PolymarketSDK) {
   // Always setup listeners provided by this function
@@ -616,31 +709,62 @@ async function setupDipArb(sdk: PolymarketSDK) {
     updateDashboard();
   });
 
-  sdk.dipArb.on('execution', (r: any) => {
-    if (r.success) {
-      const price = r.price ? r.price.toFixed(3) : '??';
-      const shares = r.shares ? r.shares.toFixed(1) : '??';
-      const market = state.activeDipArbMarket || 'unknown-market';
-
-      switch (r.leg) {
-        case 'leg1':
-          log('TRADE', `OPEN ${r.side} | ${shares} shares @ $${price} | ${market}`);
-          break;
-        case 'leg2':
-          log('TRADE', `HEDGE ${r.side} | ${shares} shares @ $${price} | Locked Profit`);
-          break;
-        case 'exit':
-          log('TRADE', `CLOSE ${r.side} (Timeout Exit) | ${shares} shares @ $${price}`);
-          break;
-        case 'merge':
-          log('TRADE', `REDEEM | Merged positions for $1.00 payout | ${market}`);
-          break;
-        default:
-          log('TRADE', `DipArb ${r.leg}: ${r.side} @ ${price}`);
-      }
-      recordTrade(0, 'dipArb');
-    } else {
+  sdk.dipArb.on('execution', (r: {
+    success: boolean;
+    leg: 'leg1' | 'leg2' | 'merge' | 'exit';
+    roundId: string;
+    side?: string;
+    price?: number;
+    shares?: number;
+    error?: string;
+  }) => {
+    if (!r.success) {
       log('WARN', `DipArb Execution Failed (${r.leg}): ${r.error || 'Unknown error'}`);
+      return;
+    }
+
+    const priceStr = r.price ? r.price.toFixed(3) : '??';
+    const sharesStr = r.shares ? r.shares.toFixed(1) : '??';
+    const market = state.activeDipArbMarket || 'unknown-market';
+    const round = dipArbRounds.get(r.roundId) || { leg1Cost: 0, leg2Cost: 0, shares: 0 };
+
+    switch (r.leg) {
+      case 'leg1':
+        round.leg1Cost = (r.price || 0) * (r.shares || 0);
+        round.shares = r.shares || 0;
+        dipArbRounds.set(r.roundId, round);
+        log('TRADE', `OPEN ${r.side} | ${sharesStr} shares @ $${priceStr} | ${market}`);
+        recordTrade(0, 'dipArb'); // position opened, outcome unknown
+        break;
+      case 'leg2':
+        round.leg2Cost = (r.price || 0) * (r.shares || 0);
+        dipArbRounds.set(r.roundId, round);
+        log('TRADE', `HEDGE ${r.side} | ${sharesStr} shares @ $${priceStr} | pair cost $${(round.leg1Cost + round.leg2Cost).toFixed(2)}`);
+        recordTrade(0, 'dipArb');
+        break;
+      case 'exit': {
+        // Timeout exit: leg1 sold at ~market price. Realised = proceeds - leg1 cost.
+        const proceeds = (r.price || 0) * (r.shares || 0);
+        const profit = round.leg1Cost > 0 ? proceeds - round.leg1Cost : 0;
+        dipArbRounds.delete(r.roundId);
+        log('TRADE', `CLOSE ${r.side} (Timeout Exit) | ${sharesStr} shares @ $${priceStr} | realised $${profit.toFixed(2)}`);
+        recordTrade(profit, 'dipArb');
+        break;
+      }
+      case 'merge': {
+        // Each merged pair pays exactly $1. Realised = pairs - (leg1 + leg2 cost).
+        const pairs = r.shares || round.shares;
+        const cost = round.leg1Cost + round.leg2Cost;
+        const profit = cost > 0 ? pairs - cost : 0;
+        dipArbRounds.delete(r.roundId);
+        log('TRADE', `MERGE | ${pairs.toFixed(1)} pairs → $${pairs.toFixed(2)} | cost $${cost.toFixed(2)} | realised $${profit.toFixed(2)} | ${market}`);
+        state.merges++;
+        recordTrade(profit, 'dipArb');
+        break;
+      }
+      default:
+        log('TRADE', `DipArb ${r.leg}: ${r.side} @ ${priceStr}`);
+        recordTrade(0, 'dipArb');
     }
   });
 
@@ -848,6 +972,8 @@ async function setupBinanceAnalysis(sdk: PolymarketSDK) {
   setInterval(updateTrends, 5 * 60 * 1000);
 }
 
+const CRYPTO_MARKET_RE = /\b(btc|bitcoin|eth|ethereum|ether|sol|solana)\b/i;
+
 async function setupDirectTrading(sdk: PolymarketSDK) {
   log('INFO', 'Direct trading setup complete - waiting for toggle');
 
@@ -876,13 +1002,16 @@ async function setupDirectTrading(sdk: PolymarketSDK) {
 
           if (!yesToken || !noToken) continue;
 
-          const isCryptoMarket = /btc|bitcoin|eth|ethereum|sol|solana/i.test(market.question || '');
+          // Whole-word match only: the previous pattern matched "method",
+          // "whether", "resolve", "solar"... and bought unrelated markets.
+          const question = market.question || '';
+          const isCryptoMarket = CRYPTO_MARKET_RE.test(question);
 
           if (isCryptoMarket && CONFIG.directTrading.trendFollowing) {
             let trend: 'up' | 'down' | 'neutral' = 'neutral';
-            if (/btc|bitcoin/i.test(market.question || '')) trend = state.btcTrend;
-            else if (/eth|ethereum/i.test(market.question || '')) trend = state.ethTrend;
-            else if (/sol|solana/i.test(market.question || '')) trend = state.solTrend;
+            if (/\b(btc|bitcoin)\b/i.test(question)) trend = state.btcTrend;
+            else if (/\b(eth|ethereum|ether)\b/i.test(question)) trend = state.ethTrend;
+            else if (/\b(sol|solana)\b/i.test(question)) trend = state.solTrend;
 
             if (trend !== 'neutral') {
               // Strategy: 
@@ -1058,15 +1187,20 @@ async function main() {
   // Handle Dashboard Commands
   dashboardEmitter.on('command', async (cmd: { command: string; payload: any }) => {
     if (cmd.command === 'toggleDryRun') {
-      const enable = cmd.payload.enabled;
-      if (CONFIG.dryRun === !enable) {
-        log('INFO', `Switching to ${!enable ? 'LIVE' : 'DRY RUN'} mode... (Requested by user)`);
+      // payload.enabled is the desired value of CONFIG.dryRun
+      const wantDryRun = !!(cmd.payload && cmd.payload.enabled);
+      if (CONFIG.dryRun !== wantDryRun) {
+        log('INFO', `Switching to ${wantDryRun ? 'DRY RUN' : 'LIVE'} mode... (Requested by user)`);
 
-        // Update Config
-        CONFIG.dryRun = !enable; // payload.enabled is "isLive?" or "isDryRun?" - let's assume payload.enabled is the NEW STATE for dryRun? 
-        // Wait, usually toggles send the new desired state. 
-        // Using "enabled" as "isDryRun enabled"
-        CONFIG.dryRun = !!enable;
+        if (!wantDryRun && ALLOW_LIVE_TOGGLE !== 'true') {
+          log('ERROR', 'Refused: switching to LIVE from the dashboard is disabled. Set ALLOW_DASHBOARD_LIVE_TOGGLE=true in .env, or restart the bot with DRY_RUN=false.');
+          return;
+        }
+
+        // Persist the risk state of the mode we are leaving, then load the other one
+        persistRisk();
+        CONFIG.dryRun = wantDryRun;
+        loadRiskForCurrentMode();
 
         // Update State paper wallet
         if (CONFIG.dryRun && !state.paper) {
@@ -1081,9 +1215,16 @@ async function main() {
 
         // Re-configure Services
 
+        // 0. Going live: make sure approvals and balance monitoring exist
+        if (!CONFIG.dryRun) {
+          await setupOnchain();
+          if (!swapService) await setupSwap();
+          await updateBalances();
+        }
+
         // 1. Arbitrage Service (Needs restart to update signer/sim mode)
         if (arbService) {
-          // Update internal flags if possible without full restart? 
+          // Update internal flags if possible without full restart?
           // ArbitrageService takes readonly config in constructor. Better to re-create.
           await arbService.stop();
           // Re-run setup
@@ -1112,6 +1253,9 @@ async function main() {
       }
     }
   });
+
+  // Restore persisted risk counters (pauses and permanent halts survive restarts)
+  loadRiskForCurrentMode();
 
   // Initialize Paper Wallet if Dry Run
   if (CONFIG.dryRun) {
@@ -1185,10 +1329,8 @@ async function main() {
 
         if (res.success) {
           log('TRADE', `✅ Position closed: ${size} shares sold`);
-          if (estimatedPnL !== 0) {
-            recordTrade(estimatedPnL, 'manual');
-            log('INFO', `Realized PnL (Est): $${estimatedPnL.toFixed(2)}`);
-          }
+          recordTrade(estimatedPnL, 'manual');
+          log('INFO', `Realized PnL (Est): $${estimatedPnL.toFixed(2)}`);
         } else {
           log('WARN', `❌ Close failed: ${res.errorMsg}`);
         }
@@ -1201,8 +1343,9 @@ async function main() {
       const { strategy, enabled } = payload;
       const strategyName = strategy as keyof typeof CONFIG;
 
-      if (CONFIG[strategyName] && typeof (CONFIG[strategyName] as any).enabled !== 'undefined') {
-        (CONFIG[strategyName] as any).enabled = enabled;
+      // Only real strategies can be toggled from the UI (not onchain, capital, risk...)
+      if (TOGGLEABLE_STRATEGIES.has(strategyName) && typeof (CONFIG[strategyName] as any).enabled !== 'undefined') {
+        (CONFIG[strategyName] as any).enabled = !!enabled;
         log('INFO', `⚙️ Strategy ${strategy} ${enabled ? 'ENABLED' : 'DISABLED'}`);
 
         // Actively Start/Stop Services based on toggle
@@ -1373,6 +1516,7 @@ async function main() {
 
   process.on('SIGINT', async () => {
     console.log('\n\nShutting down...');
+    persistRisk();
     if (arbService) await arbService.stop();
     await sdk.dipArb.stop();
     sdk.stop();
