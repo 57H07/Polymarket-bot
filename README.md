@@ -355,6 +355,8 @@ If something goes wrong:
 
 ## 📚 Additional Resources
 
+- **Step-by-Step Guide (start here)**: simulation first, then live, for non-programmers: [docs/STEP_BY_STEP_GUIDE.md](docs/STEP_BY_STEP_GUIDE.md).
+
 - **Original SDK Documentation**: For developers who want to use the raw SDK, see [SDK_DOCUMENTATION.md](SDK_DOCUMENTATION.md).
 - **Beginner Guide**: Step-by-step tutorial in [BEGINNER_GUIDE.md](BEGINNER_GUIDE.md).
 - **Quick Start**: Fast setup guide in [QUICKSTART.md](QUICKSTART.md).

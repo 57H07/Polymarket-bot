@@ -2,6 +2,8 @@
 
 **A Step-by-Step Guide for Complete Beginners**
 
+> 👉 Looking for the shortest path to running the bot? See [docs/STEP_BY_STEP_GUIDE.md](docs/STEP_BY_STEP_GUIDE.md): simulation first, then live.
+
 ---
 
 ## 📋 Table of Contents
