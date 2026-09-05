@@ -1,11 +1,23 @@
 /**
- * Bot with Dashboard - Wrapper that runs the bot with real-time monitoring UI
- * 
- * This file shows HOW to integrate the dashboard with your bot.
- * It imports the dashboard and hooks into the bot's state/logs.
- * 
+ * Polymarket Bot v3.2 + Dashboard
+ *
  * Run with: npx tsx bot-with-dashboard.ts
- * Then open: http://localhost:5173
+ * Dashboard: http://localhost:3001
+ *
+ * Two execution modes share exactly the same strategy code:
+ *
+ * - LIVE (DRY_RUN=false): orders go to the Polymarket CLOB, split/merge/redeem
+ *   go on-chain through CTFClient.
+ * - SIMULATION (DRY_RUN=true, default): orders are filled by a PaperBroker
+ *   that walks the REAL orderbook level by level, honours limit prices, fails
+ *   on insufficient depth, and charges gas on every on-chain operation. The
+ *   paper account (balance, positions, fills, realised PnL) is persisted in
+ *   data/paper-state.json so a simulation can run for days across restarts.
+ *
+ * Every strategy passes through the same gates in both modes: the persisted
+ * risk manager (daily / monthly / drawdown / total-loss), dynamic position
+ * sizing, exposure limits and the exit manager (stop-loss, take-profit,
+ * trailing stop, max hold, auto-redeem of resolved markets).
  */
 
 import 'dotenv/config';
@@ -14,12 +26,17 @@ import {
   PolymarketSDK,
   ArbitrageService,
   SwapService,
-  type SmartMoneyTrade,
   OnchainService,
+  DipArbService,
+  type SmartMoneyTrade,
 } from './src/index.js';
-import { CTFClient } from './src/clients/ctf-client.js';
+import { CTFClient, type MarketResolution, type TokenIds } from './src/clients/ctf-client.js';
+import type { ArbitrageMarketConfig, ArbitrageOpportunity, ArbitrageExecutionResult } from './src/services/arbitrage-service.js';
+import type { DipArbMarketConfig, DipArbSettleResult } from './src/services/dip-arb-types.js';
+import type { MarketOrderParams } from './src/services/trading-service.js';
 import { startDashboard, dashboardEmitter } from './src/dashboard/index.js';
 import type { BotState, BotConfig, LogLevel, DipArbSignal, SmartMoneySignal } from './src/dashboard/types.js';
+import { addSession, createSessionFromState, type TradeRecord } from './src/dashboard/session-history.js';
 import {
   applyTrade,
   createRiskState,
@@ -29,67 +46,73 @@ import {
   type RiskConfig,
   type RiskState,
 } from './src/core/risk-manager.js';
+import {
+  checkExposure,
+  dynamicPositionPct,
+  evaluateExit,
+  type ExitRules,
+} from './src/core/position-sizing.js';
+import { PaperBroker, type PaperOrderResult } from './src/core/paper-broker.js';
+import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync } from 'fs';
 import { dirname, join } from 'path';
 import { fileURLToPath } from 'url';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
+const DATA_DIR = join(__dirname, 'data');
 
 // ============================================================================
-// CONFIGURATION (same as bot-config.ts)
+// CONFIGURATION
 // ============================================================================
 
-let CONFIG = {
+const CONFIG = {
   capital: {
     totalUsd: parseFloat(process.env.CAPITAL_USD || '250'),
-    maxPerTradePct: 0.02,  // 🔴 FIXED: Reduced from 3% to 2%
+    maxPerTradePct: 0.02,
     maxPerMarketPct: 0.10,
     maxTotalExposurePct: 0.30,
-    minOrderUsd: 5,
+    minOrderUsd: 1,   // Polymarket minimum order value
     strategyAllocation: {
       smartMoney: 0.60,
       arbitrage: 0.20,
       dipArb: 0.10,
-      directTrades: 0.10,
-    },
+      direct: 0.10,
+    } as Record<string, number>,
   },
 
   risk: {
-    // Daily limits
-    dailyMaxLossPct: 0.05,  // 🔴 FIXED: Reduced from 8% to 5%
+    dailyMaxLossPct: parseFloat(process.env.DAILY_MAX_LOSS_PCT || '0.05'),
     maxConsecutiveLosses: 6,
     pauseOnBreachMinutes: 60,
+    monthlyMaxLossPct: parseFloat(process.env.MONTHLY_MAX_LOSS_PCT || '0.15'),
+    maxDrawdownFromPeak: parseFloat(process.env.MAX_DRAWDOWN_PCT || '0.25'),
+    totalMaxLossPct: parseFloat(process.env.TOTAL_MAX_LOSS_PCT || '0.40'),
 
-    // 🔴 NEW: v3.1 Multi-layer protection
-    monthlyMaxLossPct: 0.15,  // 15% monthly limit
-    maxDrawdownFromPeak: 0.25,  // 25% drawdown from peak
-    totalMaxLossPct: 0.40,  // 40% total loss - permanent halt
-
-    // 🔴 NEW: Dynamic position sizing
+    // Dynamic position sizing (see src/core/position-sizing.ts)
     enableDynamicSizing: true,
-    minPositionPct: 0.01,  // 1% minimum
-    maxPositionPct: 0.05,  // 5% maximum
-    lossSizingReduction: 0.20,  // Reduce 20% per loss
-    winSizingIncrease: 0.10,  // Increase 10% per win
+    minPositionPct: 0.01,
+    maxPositionPct: 0.05,
+    lossSizingReduction: 0.20,
+    winSizingIncrease: 0.10,
   },
 
   smartMoney: {
     enabled: process.env.SMARTMONEY_ENABLED !== 'false',
     topN: 20,
-    // 🔴 FIXED: Stricter criteria (v3.1)
-    minWinRate: 0.60,  // Up from 0.70 to match bot-config (60%+)
-    minPnl: 500,       // Up from 70 to $500
-    minTrades: 30,     // Up from 15 to 30
-
-    // 🔴 NEW: Quality filters
-    minProfitFactor: 1.5,  // Total wins / total losses >= 1.5x
-    minConsistencyScore: 0.7,  // Recent performance score
-    maxSingleTradeExposure: 0.3,  // Max 30% of PnL from one trade
-    checkLastNTrades: 10,  // Analyze last 10 trades
+    maxFollowed: 10,
+    minWinRate: 0.60,
+    minPnl: 500,
+    minTrades: 30,
+    // Quality filters computed from the trader's closed positions
+    minProfitFactor: 1.5,
+    minConsistencyScore: 0.7,
+    maxSingleTradeExposure: 0.3,
+    checkLastNTrades: 10,
+    historyDepth: 100,
 
     sizeScale: 0.1,
-    maxSizePerTrade: 15,  // Up from 10
+    maxSizePerTrade: 15,
     maxSlippage: 0.03,
-    minTradeSize: 10,  // Up from 5
+    minTradeSize: 10,
     delay: 500,
     customWallets: [
       '0xc2e7800b5af46e6093872b177b7a5e7f0563be51',
@@ -99,15 +122,14 @@ let CONFIG = {
 
   arbitrage: {
     enabled: process.env.ARBITRAGE_ENABLED === 'true',
-    // 🔴 FIXED: Higher profit threshold for gas fees
-    profitThreshold: 0.01,  // Up from 0.001 to 1%
-    minTradeSize: 20,  // Up from 5 to reduce gas impact
-    maxTradeSize: 100,  // Up from 50
+    profitThreshold: 0.01,
+    minTradeSize: 20,
+    maxTradeSize: 100,
     minVolume24h: 5000,
     autoExecute: true,
     enableRebalancer: true,
-
-    // 🔴 NEW: Gas fee accounting
+    executionCooldownMs: 5000,
+    // Gas fee accounting
     estimatedGasCostUSD: 0.10,
     minNetProfit: 0.50,
   },
@@ -119,8 +141,7 @@ let CONFIG = {
     sumTarget: 0.92,
     autoRotate: true,
     autoExecute: true,
-    // 🔴 NEW: Minimum trade value
-    minTradeValueUSD: 1.5,  // $1.50 minimum
+    minTradeValueUSD: 1.5,
   },
 
   onchain: {
@@ -140,12 +161,18 @@ let CONFIG = {
     enabled: false,
     trendFollowing: true,
     minTrendStrength: 0.02,
-    // 🔴 NEW: Stop-loss and take-profit
     stopLossPct: 0.15,
     takeProfitPct: 0.25,
     trailingStopPct: 0.10,
     maxHoldDays: 7,
     minRiskReward: 1.5,
+  },
+
+  simulation: {
+    /** Taker fee applied to paper fills (Polymarket: 0 on most markets) */
+    feeRate: parseFloat(process.env.PAPER_FEE_RATE || '0'),
+    /** Start a fresh paper account instead of loading data/paper-state.json */
+    reset: process.env.PAPER_RESET === 'true',
   },
 
   dryRun: process.env.DRY_RUN !== 'false',
@@ -154,6 +181,9 @@ let CONFIG = {
 /** Switching to LIVE from the browser is opt-in: it must be enabled in .env. */
 const ALLOW_LIVE_TOGGLE = process.env.ALLOW_DASHBOARD_LIVE_TOGGLE || 'false';
 const TOGGLEABLE_STRATEGIES = new Set<keyof typeof CONFIG>(['smartMoney', 'arbitrage', 'dipArb', 'directTrading', 'binance']);
+const CRYPTO_MARKET_RE = /\b(btc|bitcoin|eth|ethereum|ether|sol|solana)\b/i;
+
+type Strategy = 'smartMoney' | 'arbitrage' | 'dipArb' | 'direct' | 'manual';
 
 // ============================================================================
 // STATE
@@ -164,12 +194,11 @@ const state: BotState = {
   dailyPnL: 0,
   totalPnL: 0,
   consecutiveLosses: 0,
-  consecutiveWins: 0,  // 🔴 NEW
+  consecutiveWins: 0,
   tradesExecuted: 0,
   isPaused: false,
   pauseUntil: 0,
 
-  // 🔴 NEW: v3.1 Risk tracking
   monthlyPnL: 0,
   monthStartTime: Date.now(),
   peakCapital: CONFIG.capital.totalUsd,
@@ -223,8 +252,10 @@ const state: BotState = {
   smartMoneySignals: [],
 };
 
+const sessionTrades: TradeRecord[] = [];
+
 // ============================================================================
-// DASHBOARD-AWARE UTILITIES
+// UTILITIES
 // ============================================================================
 
 function log(level: LogLevel, message: string, data?: unknown) {
@@ -234,12 +265,8 @@ function log(level: LogLevel, message: string, data?: unknown) {
     ARB: '🔄', WALLET: '👛', CHAIN: '⛓️', SWAP: '💱', BRIDGE: '🌉',
     KLINE: '📊', TREND: '📈',
   };
-
-  // Console output (CLI)
   console.log(`[${timestamp}] ${icons[level] || '•'} ${message}`);
   if (data) console.log(JSON.stringify(data, null, 2));
-
-  // Dashboard output (WebSocket)
   dashboardEmitter.log(level, message, data);
 }
 
@@ -247,14 +274,21 @@ function updateDashboard() {
   dashboardEmitter.updateState(state);
 }
 
+function modeTag(): string {
+  return CONFIG.dryRun ? '[SIM]' : '[LIVE]';
+}
+
+function writeJsonAtomic(file: string, payload: unknown) {
+  const dir = dirname(file);
+  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+  const tmp = `${file}.tmp`;
+  writeFileSync(tmp, JSON.stringify(payload, null, 2));
+  renameSync(tmp, file);
+}
+
 // ============================================================================
 // RISK MANAGEMENT (persisted, see src/core/risk-manager.ts)
 // ============================================================================
-//
-// Risk counters are kept in `risk`, mirrored into `state` for the dashboard,
-// and written to data/risk-state.<mode>.json after every change so that a
-// restart cannot lift a pause or a permanent halt. Dry-run and live keep
-// separate files so paper results never gate real trading.
 
 function riskConfig(): RiskConfig {
   return {
@@ -269,10 +303,11 @@ function riskConfig(): RiskConfig {
 }
 
 function riskStatePath(dryRun: boolean): string {
-  return join(__dirname, 'data', `risk-state.${dryRun ? 'dry' : 'live'}.json`);
+  return join(DATA_DIR, `risk-state.${dryRun ? 'dry' : 'live'}.json`);
 }
 
 let risk: RiskState = createRiskState(CONFIG.capital.totalUsd);
+let lastHaltLog = 0;
 
 function syncRiskToState() {
   state.dailyPnL = risk.dailyPnL;
@@ -299,20 +334,19 @@ function persistRisk() {
   }
 }
 
-/** Load the risk state for the current mode (called at startup and on mode switch). */
 function loadRiskForCurrentMode() {
   const file = riskStatePath(CONFIG.dryRun);
-  const loaded = loadRiskState(file);
+  const loaded = CONFIG.dryRun && CONFIG.simulation.reset ? null : loadRiskState(file);
   if (loaded) {
     risk = loaded.state;
     const age = Math.round((Date.now() - loaded.savedAt) / 60000);
     log('INFO', `Risk state restored from ${file} (saved ${age} min ago): total PnL $${risk.totalPnL.toFixed(2)}, paused=${risk.isPaused}, halted=${risk.permanentlyHalted}`);
     if (loaded.capitalUsd !== CONFIG.capital.totalUsd) {
-      log('WARN', `CAPITAL_USD changed since last run ($${loaded.capitalUsd} → $${CONFIG.capital.totalUsd}). Loss limits are computed on the new value; delete ${file} to start fresh.`);
+      log('WARN', `CAPITAL_USD changed since last run ($${loaded.capitalUsd} → $${CONFIG.capital.totalUsd}). Loss limits use the new value; delete ${file} to start fresh.`);
     }
   } else {
     risk = createRiskState(CONFIG.capital.totalUsd);
-    log('INFO', `No risk state found for ${CONFIG.dryRun ? 'dry-run' : 'live'} mode, starting fresh`);
+    log('INFO', `No risk state loaded for ${CONFIG.dryRun ? 'simulation' : 'live'} mode, starting fresh`);
   }
   syncRiskToState();
   updateDashboard();
@@ -324,121 +358,400 @@ function canTrade(): boolean {
 
   for (const message of decision.messages) {
     const level: LogLevel = decision.breach === 'total_loss' || decision.breach === 'permanent_halt'
-      ? 'ERROR'
-      : decision.breach ? 'WARN' : 'INFO';
+      ? 'ERROR' : decision.breach ? 'WARN' : 'INFO';
     log(level, message);
   }
 
-  if (decision.breach === 'permanent_halt') {
-    // Already halted before this call - keep the log quiet (once per minute)
-    if (Date.now() - lastHaltLog > 60_000) {
-      log('ERROR', '🛑 Trading permanently halted - total loss limit reached');
-      lastHaltLog = Date.now();
-    }
+  if (decision.breach === 'permanent_halt' && Date.now() - lastHaltLog > 60_000) {
+    log('ERROR', '🛑 Trading permanently halted - total loss limit reached');
+    lastHaltLog = Date.now();
   }
 
+  syncRiskToState();
   if (decision.breach || decision.resumed || wasPaused !== risk.isPaused) {
-    syncRiskToState();
     persistRisk();
     updateDashboard();
-  } else {
-    syncRiskToState();
   }
-
   return decision.allowed;
 }
-let lastHaltLog = 0;
 
 /**
- * Record a realised trade result. Pass the real profit (or loss) in USD.
- * Pass 0 for an opening leg whose outcome is not yet known: it counts as a
- * trade but does not move PnL or win/loss streaks.
+ * Record a realised trade result (real profit or loss in USD). Pass 0 for an
+ * opening fill whose outcome is not yet known: it counts as a trade but does
+ * not move PnL or win/loss streaks.
  */
-function recordTrade(profit: number, strategy: string) {
+function recordTrade(profit: number, strategy: Strategy, details?: Partial<TradeRecord>) {
   applyTrade(risk, profit);
 
   if (strategy === 'smartMoney') state.smartMoneyTrades++;
-  else if (strategy === 'arbitrage') state.arbTrades++;
+  else if (strategy === 'arbitrage') { state.arbTrades++; state.arbProfit += profit; }
   else if (strategy === 'dipArb') state.dipArbTrades++;
   else if (strategy === 'direct') state.directTrades++;
 
+  if (details && strategy !== 'manual') {
+    sessionTrades.push({
+      id: `t-${Date.now()}-${sessionTrades.length}`,
+      timestamp: new Date().toISOString(),
+      strategy,
+      market: details.market ?? 'unknown',
+      side: details.side ?? 'BUY',
+      size: details.size ?? 0,
+      price: details.price ?? 0,
+      profit,
+      wallet: details.wallet,
+      txHash: details.txHash,
+    });
+  }
+
   syncRiskToState();
   persistRisk();
-  // Re-evaluate immediately so a breach pauses the bot before the next signal
-  canTrade();
+  canTrade(); // re-evaluate immediately so a breach pauses the bot before the next signal
   updateDashboard();
 }
 
-function simulateTrade(profit: number, strategy: string, description: string) {
-  if (!CONFIG.dryRun || !state.paper) return;
+// ============================================================================
+// POSITION SIZING & EXPOSURE
+// ============================================================================
 
-  state.paper.trades++;
-  state.paper.pnl += profit;
-  state.paper.balance += profit;
+/** Fraction of capital for the next trade, adapted to the current streaks. */
+function positionPct(): number {
+  return dynamicPositionPct({
+    enableDynamicSizing: CONFIG.risk.enableDynamicSizing,
+    basePct: CONFIG.capital.maxPerTradePct,
+    minPositionPct: CONFIG.risk.minPositionPct,
+    maxPositionPct: CONFIG.risk.maxPositionPct,
+    lossSizingReduction: CONFIG.risk.lossSizingReduction,
+    winSizingIncrease: CONFIG.risk.winSizingIncrease,
+  }, risk);
+}
 
-  // Log as a special SIMULATION event
-  log('TRADE', `[SIMULATION] ${description} | Est. Profit: $${profit.toFixed(2)}`);
+interface OpenTradeEntry {
+  tokenId: string;
+  conditionId: string;
+  strategy: Strategy;
+  outcome: string;
+  title: string;
+  usd: number;          // cost basis
+  shares: number;
+  entryPrice: number;
+  openedAt: number;
+  peakPrice: number;
+}
 
-  // Update main PnL so the user sees movement on the dashboard (as requested)
-  recordTrade(profit, strategy);
+/** Live-mode ledger of positions this bot opened (paper mode reads the broker instead). */
+const liveTrades = new Map<string, OpenTradeEntry>();
+const liveTradesFile = join(DATA_DIR, 'open-trades.live.json');
+
+function loadLiveTrades() {
+  try {
+    if (!existsSync(liveTradesFile)) return;
+    const raw = JSON.parse(readFileSync(liveTradesFile, 'utf-8')) as OpenTradeEntry[];
+    for (const e of raw) liveTrades.set(e.tokenId, e);
+    log('INFO', `Restored ${liveTrades.size} open live trades from ledger`);
+  } catch { /* start empty */ }
+}
+
+function saveLiveTrades() {
+  if (paper) return; // the paper broker owns positions in simulation
+  try { writeJsonAtomic(liveTradesFile, [...liveTrades.values()]); } catch { /* ignore */ }
+}
+
+function openTrades(): OpenTradeEntry[] {
+  if (paper) {
+    return paper.getPositions().map(p => ({
+      tokenId: p.tokenId,
+      conditionId: p.conditionId,
+      strategy: (p.strategy as Strategy) || 'manual',
+      outcome: p.outcome,
+      title: p.title || p.conditionId,
+      usd: p.avgCost * p.shares,
+      shares: p.shares,
+      entryPrice: p.avgCost,
+      openedAt: p.openedAt,
+      peakPrice: p.peakPrice,
+    }));
+  }
+  return [...liveTrades.values()];
+}
+
+/**
+ * Clamp a desired order to the capital limits: dynamic per-trade size,
+ * per-market cap, total exposure cap and per-strategy allocation.
+ */
+function sizeOrder(strategy: Strategy, desiredUsd: number, conditionId: string): { ok: boolean; usd: number; reason?: string } {
+  const open = openTrades();
+  const exposure = {
+    total: open.reduce((s, t) => s + t.usd, 0),
+    market: open.filter(t => t.conditionId === conditionId).reduce((s, t) => s + t.usd, 0),
+    strategy: open.filter(t => t.strategy === strategy).reduce((s, t) => s + t.usd, 0),
+  };
+  const decision = checkExposure({
+    capitalUsd: CONFIG.capital.totalUsd,
+    maxPerTradePct: positionPct(),
+    maxPerMarketPct: CONFIG.capital.maxPerMarketPct,
+    maxTotalExposurePct: CONFIG.capital.maxTotalExposurePct,
+    minOrderUsd: CONFIG.capital.minOrderUsd,
+    strategyAllocation: CONFIG.capital.strategyAllocation,
+  }, strategy, desiredUsd, exposure);
+  return { ok: decision.allowed, usd: decision.sizeUsd, reason: decision.reason };
 }
 
 // ============================================================================
-// ============================================================================
-// STRATEGIES (simplified versions - copy full implementations from bot-config.ts)
+// EXECUTION LAYER (live CLOB/CTF or paper broker)
 // ============================================================================
 
-let arbService: ArbitrageService | null = null;
-const simulatedArbAt = new Map<string, number>();
-const SIMULATED_ARB_COOLDOWN_MS = 60_000;
-let isSmartMoneyInitialized = false;
-let isSmartMoneyInitializing = false;
+let sdk: PolymarketSDK;
+let paper: PaperBroker | null = null;
+let liveCtf: CTFClient | null = null;
+let readOnlyCtf: CTFClient | null = null;
 
-async function setupSmartMoney(sdk: PolymarketSDK) {
-  if (CONFIG.smartMoney.enabled) {
-    initializeSmartMoney(sdk);
+const paperStateFile = join(DATA_DIR, 'paper-state.json');
+
+/** Mid price from the live orderbook (best bid when no ask, and vice versa). */
+async function fetchMidPrice(tokenId: string): Promise<number | null> {
+  try {
+    const book = await sdk.markets.getTokenOrderbook(tokenId);
+    const bid = book.bids[0]?.price;
+    const ask = book.asks[0]?.price;
+    if (bid && ask) return (bid + ask) / 2;
+    return bid ?? ask ?? null;
+  } catch {
+    return null;
   }
 }
 
-async function initializeSmartMoney(sdk: PolymarketSDK) {
+async function tokenIdsFor(conditionId: string): Promise<TokenIds & { title: string; outcomes: [string, string] }> {
+  const market = await sdk.markets.getMarket(conditionId);
+  if (!market?.tokens || market.tokens.length < 2) throw new Error(`market ${conditionId} has no tokens`);
+  return {
+    yesTokenId: market.tokens[0].tokenId,
+    noTokenId: market.tokens[1].tokenId,
+    title: market.question,
+    outcomes: [market.tokens[0].outcome, market.tokens[1].outcome],
+  };
+}
+
+/** Resolution from the chain first, Gamma as fallback (winner flag on closed markets). */
+async function marketResolution(conditionId: string): Promise<MarketResolution> {
+  try {
+    const res = await readOnlyCtf!.getMarketResolution(conditionId);
+    if (res.isResolved) return res;
+  } catch { /* fall through */ }
+  try {
+    const market = await sdk.markets.getMarket(conditionId);
+    if (market.closed && market.tokens?.length >= 2) {
+      const yesWon = !!market.tokens[0].winner;
+      const noWon = !!market.tokens[1].winner;
+      if (yesWon !== noWon) {
+        return {
+          conditionId,
+          isResolved: true,
+          winningOutcome: yesWon ? 'YES' : 'NO',
+          payoutNumerators: yesWon ? [1, 0] : [0, 1],
+          payoutDenominator: 1,
+        };
+      }
+    }
+  } catch { /* not resolved */ }
+  return { conditionId, isResolved: false, payoutNumerators: [0, 0], payoutDenominator: 0 };
+}
+
+function setupPaperBroker() {
+  paper = new PaperBroker({
+    initialBalance: CONFIG.capital.totalUsd,
+    gasCostUsd: CONFIG.arbitrage.estimatedGasCostUSD,
+    feeRate: CONFIG.simulation.feeRate,
+    defaultSlippage: CONFIG.smartMoney.maxSlippage,
+    stateFile: paperStateFile,
+  }, {
+    fetchBook: async (tokenId) => {
+      const book = await sdk.markets.getTokenOrderbook(tokenId);
+      return { bids: book.bids, asks: book.asks };
+    },
+    resolveTokenIds: async (conditionId) => {
+      const t = await tokenIdsFor(conditionId);
+      return { yesTokenId: t.yesTokenId, noTokenId: t.noTokenId };
+    },
+    getResolution: marketResolution,
+  });
+
+  if (!CONFIG.simulation.reset && paper.load()) {
+    const s = paper.summary();
+    log('INFO', `📝 Paper account restored: balance $${s.balance.toFixed(2)}, ${paper.getPositions().length} open positions, realised $${s.realizedPnl.toFixed(2)}, gas $${s.gasSpent.toFixed(2)}`);
+  } else {
+    paper.save();
+    log('INFO', `📝 Paper account created with $${CONFIG.capital.totalUsd.toFixed(2)} (fills against live orderbooks, gas $${CONFIG.arbitrage.estimatedGasCostUSD}/op)`);
+  }
+  syncPaperToState();
+}
+
+function syncPaperToState() {
+  if (!paper) return;
+  const s = paper.summary();
+  state.paper = {
+    balance: s.balance,
+    initialBalance: s.initialBalance,
+    pnl: s.realizedPnl + s.unrealizedPnl,
+    trades: s.fills,
+    totalVolume: paper.getFills(1000).reduce((sum, f) => sum + Math.abs(f.usdc), 0),
+  };
+  state.usdcEBalance = s.balance;
+  state.usdcBalance = 0;
+  state.unrealizedPnL = s.unrealizedPnl;
+}
+
+interface FillInfo { success: boolean; error?: string; shares: number; avgPrice: number; usd: number; realizedPnl?: number; orderId?: string }
+
+/**
+ * Place a market order through the active execution layer.
+ * BUY: `amount` is USDC. SELL: `amount` is shares.
+ */
+async function placeOrder(params: MarketOrderParams, strategy: Strategy, meta: { conditionId: string; outcome: string; title: string }): Promise<FillInfo> {
+  if (paper) {
+    paper.registerToken(params.tokenId, { conditionId: meta.conditionId, outcome: meta.outcome, title: meta.title, strategy });
+    const r: PaperOrderResult = await paper.createMarketOrder({ ...params, strategy, conditionId: meta.conditionId });
+    paper.save();
+    syncPaperToState();
+    return {
+      success: r.success, error: r.errorMsg, orderId: r.orderId,
+      shares: r.filledShares ?? 0, avgPrice: r.avgPrice ?? 0, usd: r.usdc ?? 0, realizedPnl: r.realizedPnl,
+    };
+  }
+
+  const r = await sdk.tradingService.createMarketOrder(params);
+  if (!r.success) return { success: false, error: r.errorMsg, shares: 0, avgPrice: 0, usd: 0 };
+
+  // The CLOB does not return fill details synchronously: estimate from the price we sent
+  const price = params.price ?? (await fetchMidPrice(params.tokenId)) ?? 0;
+  const shares = params.side === 'BUY' ? (price > 0 ? params.amount / price : 0) : params.amount;
+  const usd = params.side === 'BUY' ? params.amount : params.amount * price;
+
+  if (params.side === 'BUY') {
+    const existing = liveTrades.get(params.tokenId);
+    if (existing) {
+      const totalUsd = existing.usd + usd;
+      const totalShares = existing.shares + shares;
+      existing.usd = totalUsd;
+      existing.shares = totalShares;
+      existing.entryPrice = totalShares > 0 ? totalUsd / totalShares : existing.entryPrice;
+    } else {
+      liveTrades.set(params.tokenId, {
+        tokenId: params.tokenId, conditionId: meta.conditionId, strategy, outcome: meta.outcome, title: meta.title,
+        usd, shares, entryPrice: price, openedAt: Date.now(), peakPrice: price,
+      });
+    }
+    saveLiveTrades();
+    return { success: true, orderId: r.orderId, shares, avgPrice: price, usd };
+  }
+
+  const entry = liveTrades.get(params.tokenId);
+  let realizedPnl: number | undefined;
+  if (entry) {
+    const sold = Math.min(shares, entry.shares);
+    realizedPnl = sold * price - sold * entry.entryPrice;
+    entry.shares -= sold;
+    entry.usd = entry.shares * entry.entryPrice;
+    if (entry.shares <= 1e-6) liveTrades.delete(params.tokenId);
+    saveLiveTrades();
+  }
+  return { success: true, orderId: r.orderId, shares, avgPrice: price, usd, realizedPnl };
+}
+
+/** Redeem a resolved position through the active layer. Returns realised PnL (net of gas) or null. */
+async function redeemTrade(entry: OpenTradeEntry): Promise<number | null> {
+  const ids = await tokenIdsFor(entry.conditionId);
+  const tokenIds = { yesTokenId: ids.yesTokenId, noTokenId: ids.noTokenId };
+  if (paper) {
+    const before = paper.getRealizedPnl();
+    await paper.redeemByTokenIds(entry.conditionId, tokenIds);
+    paper.save();
+    syncPaperToState();
+    return paper.getRealizedPnl() - before;
+  }
+  if (!liveCtf) return null;
+  const result = await liveCtf.redeemByTokenIds(entry.conditionId, tokenIds);
+  if (!result.success) return null;
+  const received = parseFloat(result.usdcReceived || '0');
+  const cost = [...liveTrades.values()].filter(t => t.conditionId === entry.conditionId).reduce((s, t) => s + t.usd, 0);
+  for (const t of [...liveTrades.values()]) if (t.conditionId === entry.conditionId) liveTrades.delete(t.tokenId);
+  saveLiveTrades();
+  return received - cost - CONFIG.arbitrage.estimatedGasCostUSD;
+}
+
+// ============================================================================
+// 1. SMART MONEY (copy trading with quality filters)
+// ============================================================================
+
+let isSmartMoneyInitialized = false;
+let isSmartMoneyInitializing = false;
+let smartMoneySubscription: { unsubscribe: () => void } | null = null;
+
+interface TraderQuality {
+  winRate: number; profitFactor: number; consistency: number; whaleShare: number; closedTrades: number;
+}
+
+/** Track-record metrics from a trader's closed positions (realised PnL per market). */
+async function traderQuality(address: string): Promise<TraderQuality | null> {
+  const closed = await sdk.dataApi.getClosedPositions(address, { limit: CONFIG.smartMoney.historyDepth });
+  if (!closed.length) return null;
+  const pnls = closed.map(p => Number(p.realizedPnl) || 0);
+  const wins = pnls.filter(p => p > 0);
+  const losses = pnls.filter(p => p < 0);
+  const totalWins = wins.reduce((s, p) => s + p, 0);
+  const totalLosses = Math.abs(losses.reduce((s, p) => s + p, 0));
+  const recent = [...closed].sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0)).slice(0, CONFIG.smartMoney.checkLastNTrades);
+  const recentWins = recent.filter(p => (Number(p.realizedPnl) || 0) > 0).length;
+  const absSorted = pnls.map(Math.abs).sort((a, b) => b - a);
+  const totalAbs = absSorted.reduce((s, v) => s + v, 0);
+  return {
+    winRate: wins.length / pnls.length,
+    profitFactor: totalLosses > 0 ? totalWins / totalLosses : (totalWins > 0 ? 999 : 0),
+    consistency: recent.length ? recentWins / recent.length : 0,
+    whaleShare: totalAbs > 0 ? absSorted[0] / totalAbs : 0,
+    closedTrades: pnls.length,
+  };
+}
+
+async function initializeSmartMoney() {
   if (isSmartMoneyInitialized || isSmartMoneyInitializing) return;
   isSmartMoneyInitializing = true;
+  log('WALLET', 'Setting up Smart Money with quality filtering (win rate, profit factor, consistency, whale check)...');
 
-  log('WALLET', 'Setting up Smart Money with quality filtering...');
-
+  const cfg = CONFIG.smartMoney;
   const qualified: string[] = [];
-
-  if (CONFIG.smartMoney.customWallets?.length > 0) {
-    for (const wallet of CONFIG.smartMoney.customWallets) {
-      qualified.push(wallet);
-      log('WALLET', `⭐ Custom wallet added: ${wallet.slice(0, 10)}...`);
-    }
+  for (const wallet of cfg.customWallets) {
+    qualified.push(wallet.toLowerCase());
+    log('WALLET', `⭐ Custom wallet added: ${wallet.slice(0, 10)}...`);
   }
 
   try {
-    const leaderboard = await sdk.wallets.getLeaderboardByPeriod('week', CONFIG.smartMoney.topN * 2, 'pnl');
-
+    const leaderboard = await sdk.wallets.getLeaderboardByPeriod('week', cfg.topN * 2, 'pnl');
     for (const entry of leaderboard) {
-      // Check if disabled mid-process to abort early
-      if (!CONFIG.smartMoney.enabled && qualified.length === 0) break;
+      if (!CONFIG.smartMoney.enabled) break;
+      if (qualified.length >= cfg.maxFollowed) break;
+      const address = entry.address.toLowerCase();
+      if (qualified.includes(address)) continue;
+      if ((entry.pnl ?? 0) < cfg.minPnl) continue;
 
-      if (qualified.length >= 10) break; // User limit: Max 10 qualified wallets
-      if (qualified.includes(entry.address)) continue;
+      try {
+        const q = await traderQuality(address);
+        if (!q) continue;
+        const failures: string[] = [];
+        if (q.closedTrades < cfg.minTrades) failures.push(`trades ${q.closedTrades}<${cfg.minTrades}`);
+        if (q.winRate < cfg.minWinRate) failures.push(`WR ${(q.winRate * 100).toFixed(0)}%<${cfg.minWinRate * 100}%`);
+        if (q.profitFactor < cfg.minProfitFactor) failures.push(`PF ${q.profitFactor.toFixed(2)}<${cfg.minProfitFactor}`);
+        if (q.consistency < cfg.minConsistencyScore) failures.push(`consistency ${(q.consistency * 100).toFixed(0)}%<${cfg.minConsistencyScore * 100}%`);
+        if (q.whaleShare > cfg.maxSingleTradeExposure) failures.push(`whale ${(q.whaleShare * 100).toFixed(0)}%>${cfg.maxSingleTradeExposure * 100}%`);
 
-      const profile = await sdk.wallets.getWalletProfile(entry.address);
-      if (!profile) continue;
-
-      const winRate = (profile as any).winRate ?? 0;
-      const pnl = entry.pnl ?? 0;
-      const trades = profile.tradeCount ?? 0;
-
-      if (winRate >= CONFIG.smartMoney.minWinRate &&
-        pnl >= CONFIG.smartMoney.minPnl &&
-        trades >= CONFIG.smartMoney.minTrades) {
-        qualified.push(entry.address);
-        log('WALLET', `✅ Qualified: ${entry.address.slice(0, 10)}... (WR:${(winRate * 100).toFixed(0)}% PnL:$${pnl.toFixed(0)} T:${trades})`);
+        if (failures.length === 0) {
+          qualified.push(address);
+          log('WALLET', `✅ Qualified ${address.slice(0, 10)}... WR:${(q.winRate * 100).toFixed(0)}% PF:${q.profitFactor.toFixed(2)}x Cons:${(q.consistency * 100).toFixed(0)}% PnL:$${(entry.pnl ?? 0).toFixed(0)}`);
+        } else {
+          log('WALLET', `❌ Rejected ${address.slice(0, 10)}...: ${failures.join(', ')}`);
+        }
+      } catch (err) {
+        log('WARN', `Quality check failed for ${address.slice(0, 10)}...: ${(err as Error).message}`);
       }
-
       await new Promise(r => setTimeout(r, 300));
     }
   } catch (err) {
@@ -450,490 +763,393 @@ async function initializeSmartMoney(sdk: PolymarketSDK) {
   updateDashboard();
 
   if (qualified.length > 0) {
-    // Subscribe to smart money trades. The address filter is essential:
-    // without it every trade on Polymarket would be reported as a signal.
-    sdk.smartMoney.subscribeSmartMoneyTrades(
-      async (trade: SmartMoneyTrade) => {
-        if (!CONFIG.smartMoney.enabled) return;
-
-        // Add to smart money signals for dashboard
-        const signal: SmartMoneySignal = {
-          id: `sm-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
-          timestamp: new Date().toISOString(),
-          wallet: trade.traderAddress,
-          market: trade.marketSlug || 'Unknown',
-          side: trade.side as 'BUY' | 'SELL',
-          size: trade.size,
-          price: trade.price,
-        };
-        state.smartMoneySignals.unshift(signal);
-        if (state.smartMoneySignals.length > 50) {
-          state.smartMoneySignals = state.smartMoneySignals.slice(0, 50);
-        }
-
-        log('SIGNAL', `Copy trade signal from ${trade.traderAddress.slice(0, 10)}...`, {
-          market: trade.marketSlug?.slice(0, 50),
-          side: trade.side,
-          size: trade.size,
-          price: trade.price,
-        });
-        updateDashboard();
-
-        if (!canTrade()) return;
-
-        const plan = planCopyTrade(trade);
-        if (!plan) return;
-
-        if (CONFIG.dryRun) {
-          simulateTrade(0, 'smartMoney', `Smart Money Copy: ${trade.side} $${plan.usdcAmount.toFixed(2)} (${plan.shares.toFixed(2)} sh) @ ≤${plan.limitPrice.toFixed(3)} on ${trade.marketSlug || trade.conditionId}`);
-          return;
-        }
-
-        try {
-          if (CONFIG.smartMoney.delay > 0) {
-            await new Promise(r => setTimeout(r, CONFIG.smartMoney.delay));
-          }
-          const res = await sdk.tradingService.createMarketOrder({
-            tokenId: plan.tokenId,
-            side: trade.side,
-            amount: plan.usdcAmount,
-            price: plan.limitPrice,
-            orderType: 'FOK',
-          });
-          if (res.success) {
-            // Opening a position: realised PnL is unknown until it is closed,
-            // so record the trade with 0 profit (does not touch streaks).
-            recordTrade(0, 'smartMoney');
-            log('TRADE', `✅ Copied ${trade.side} $${plan.usdcAmount.toFixed(2)} from ${trade.traderAddress.slice(0, 8)}... (order ${res.orderId || 'n/a'})`);
-          } else {
-            log('WARN', `❌ Copy trade failed: ${res.errorMsg || 'unknown error'}`);
-          }
-        } catch (err) {
-          log('WARN', `❌ Copy trade error: ${(err as Error).message}`);
-        }
-      },
-      { filterAddresses: qualified }
+    smartMoneySubscription = sdk.smartMoney.subscribeSmartMoneyTrades(
+      (trade: SmartMoneyTrade) => { void handleSmartMoneyTrade(trade); },
+      { filterAddresses: qualified },
     );
   }
   isSmartMoneyInitialized = true;
   isSmartMoneyInitializing = false;
 }
 
-/**
- * Size a copy trade from the leader's trade. Mirrors SmartMoneyService.startAutoCopyTrading
- * but runs after the risk gate. Returns null when the trade should be skipped.
- */
-function planCopyTrade(trade: SmartMoneyTrade): { tokenId: string; usdcAmount: number; shares: number; limitPrice: number } | null {
-  const cfg = CONFIG.smartMoney;
-  if (!trade.tokenId || !(trade.price > 0) || !(trade.size > 0)) return null;
-
-  const leaderValue = trade.size * trade.price;
-  if (leaderValue < cfg.minTradeSize) return null;
-
-  let usdcAmount = leaderValue * cfg.sizeScale;
-  usdcAmount = Math.min(usdcAmount, cfg.maxSizePerTrade);
-  // Hard cap from capital config, whichever is lower
-  usdcAmount = Math.min(usdcAmount, CONFIG.capital.totalUsd * CONFIG.capital.maxPerTradePct);
-  if (usdcAmount < 1) return null; // Polymarket minimum order
-
-  const limitPrice = trade.side === 'BUY'
-    ? Math.min(0.99, trade.price * (1 + cfg.maxSlippage))
-    : Math.max(0.01, trade.price * (1 - cfg.maxSlippage));
-
-  return { tokenId: trade.tokenId, usdcAmount, shares: usdcAmount / trade.price, limitPrice };
+function stopSmartMoney() {
+  smartMoneySubscription?.unsubscribe();
+  smartMoneySubscription = null;
+  isSmartMoneyInitialized = false;
 }
 
+async function handleSmartMoneyTrade(trade: SmartMoneyTrade) {
+  if (!CONFIG.smartMoney.enabled) return;
 
-
-async function setupArbitrage(_sdk: PolymarketSDK) {
-  // Always setup service and listeners
-  log('ARB', 'Setting up Arbitrage Service...');
-
-  state.arbitrage.status = 'idle';
+  const signal: SmartMoneySignal = {
+    id: `sm-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+    timestamp: new Date().toISOString(),
+    wallet: trade.traderAddress,
+    market: trade.marketSlug || 'Unknown',
+    side: trade.side,
+    size: trade.size,
+    price: trade.price,
+  };
+  state.smartMoneySignals.unshift(signal);
+  if (state.smartMoneySignals.length > 50) state.smartMoneySignals = state.smartMoneySignals.slice(0, 50);
+  log('SIGNAL', `Copy signal from ${trade.traderAddress.slice(0, 10)}...: ${trade.side} ${trade.size.toFixed(1)} @ ${trade.price.toFixed(3)} ${trade.marketSlug?.slice(0, 50) || ''}`);
   updateDashboard();
 
-  // Create standalone ArbitrageService (not using SDK wrapper)
-  arbService = new ArbitrageService({
-    privateKey: CONFIG.dryRun ? undefined : process.env.POLYMARKET_PRIVATE_KEY,
-    profitThreshold: CONFIG.arbitrage.profitThreshold,
-    minTradeSize: CONFIG.arbitrage.minTradeSize,
-    maxTradeSize: CONFIG.arbitrage.maxTradeSize,
-    autoExecute: !CONFIG.dryRun && CONFIG.arbitrage.autoExecute,
-    enableRebalancer: !CONFIG.dryRun && CONFIG.arbitrage.enableRebalancer,
-    enableLogging: true,
-  });
+  if (!trade.tokenId || !(trade.price > 0) || !(trade.size > 0)) return;
+  const cfg = CONFIG.smartMoney;
+  const meta = { conditionId: trade.conditionId || 'unknown', outcome: trade.outcome || '?', title: trade.marketSlug || trade.conditionId || 'unknown' };
 
-  arbService.on('opportunity', (opp) => {
-    state.activeArbMarket = opp.market?.name || 'scanning';
-    state.arbitrage.opportunitiesFound++;
-    state.arbitrage.lastOpportunity = {
-      timestamp: new Date().toISOString(),
-      type: opp.type as 'long' | 'short',
-      profitPct: opp.profitPercent / 100,
-      market: opp.market?.name || 'Unknown',
-    };
-    log('ARB', `Opportunity: ${opp.type.toUpperCase()} +${opp.profitPercent.toFixed(2)}%`);
-
-    // SIMULATION HOOK
-    // 'opportunity' fires on every orderbook update, so the same opportunity
-    // would be "earned" dozens of times. Count it once per market/type per
-    // execution cooldown, and only if the risk gate allows a trade.
-    if (CONFIG.dryRun && opp.profitPercent > 0) {
-      const key = `${state.arbitrage.currentMarket || opp.market?.name || 'unknown'}:${opp.type}`;
-      const last = simulatedArbAt.get(key) || 0;
-      if (Date.now() - last >= SIMULATED_ARB_COOLDOWN_MS && canTrade()) {
-        simulatedArbAt.set(key, Date.now());
-        const size = Math.min(opp.recommendedSize || CONFIG.arbitrage.minTradeSize, CONFIG.arbitrage.maxTradeSize);
-        const estimatedProfit = size * (opp.profitPercent / 100);
-        simulateTrade(estimatedProfit, 'arbitrage', `Arb ${opp.type} ${opp.market?.name || ''} size $${size.toFixed(2)} (estimate, not a fill)`);
-      }
+  // Leader SELL: close our copy of that position (if any)
+  if (trade.side === 'SELL') {
+    const held = openTrades().find(t => t.tokenId === trade.tokenId);
+    if (!held) return;
+    let shares = Math.min(held.shares, trade.size * cfg.sizeScale);
+    if ((held.shares - shares) * trade.price < 1) shares = held.shares; // avoid unsellable dust
+    const limit = Math.max(0.01, trade.price * (1 - cfg.maxSlippage));
+    const fill = await placeOrder({ tokenId: trade.tokenId, side: 'SELL', amount: shares, price: limit, orderType: 'FAK' }, 'smartMoney', meta);
+    if (fill.success) {
+      const pnl = fill.realizedPnl ?? 0;
+      log('TRADE', `${modeTag()} Copied SELL ${fill.shares.toFixed(2)} sh @ ${fill.avgPrice.toFixed(3)} | realised $${pnl.toFixed(2)}`);
+      recordTrade(pnl, 'smartMoney', { market: meta.title, side: 'SELL', size: fill.shares, price: fill.avgPrice, wallet: trade.traderAddress });
+    } else {
+      log('WARN', `${modeTag()} Copy SELL failed: ${fill.error}`);
     }
+    return;
+  }
 
-    updateDashboard();
-  });
+  // Leader BUY
+  if (!canTrade()) return;
+  const leaderValue = trade.size * trade.price;
+  if (leaderValue < cfg.minTradeSize) return;
+  const desired = Math.min(leaderValue * cfg.sizeScale, cfg.maxSizePerTrade);
+  const sized = sizeOrder('smartMoney', desired, meta.conditionId);
+  if (!sized.ok) {
+    log('INFO', `Copy skipped (${sized.reason})`);
+    return;
+  }
+  if (cfg.delay > 0) await new Promise(r => setTimeout(r, cfg.delay));
 
-  arbService.on('execution', (result) => {
-    if (result.success) {
-      state.arbProfit += result.profit || 0;
-      recordTrade(result.profit || 0, 'arbitrage');
-      log('TRADE', `Arb trade executed: +$${(result.profit || 0).toFixed(2)} profit`);
-    }
-  });
-
-  // Scan for arbitrage opportunities ONLY if enabled
-  if (CONFIG.arbitrage.enabled) {
-    state.arbitrage.status = 'scanning';
-    try {
-      const results = await arbService.scanMarkets(
-        { minVolume24h: CONFIG.arbitrage.minVolume24h },
-        CONFIG.arbitrage.profitThreshold
-      );
-      state.arbitrage.marketsScanned = results.length;
-      const opps = results.filter(r => r.arbType !== 'none');
-
-      if (opps.length > 0) {
-        state.activeArbMarket = opps[0].market.name;
-        state.arbitrage.currentMarket = opps[0].market.name;
-        state.arbitrage.status = 'monitoring';
-        await arbService.start(opps[0].market);
-        log('ARB', `Started monitoring: ${opps[0].market.name}`);
-      } else {
-        state.arbitrage.status = 'idle';
-        log('ARB', 'No arbitrage opportunities found, will keep scanning...');
-      }
-      updateDashboard();
-    } catch (err) {
-      state.arbitrage.status = 'idle';
-      log('WARN', `Arbitrage scan error: ${(err as Error).message}`);
-      updateDashboard();
-    }
+  const limit = Math.min(0.99, trade.price * (1 + cfg.maxSlippage));
+  const fill = await placeOrder({ tokenId: trade.tokenId, side: 'BUY', amount: sized.usd, price: limit, orderType: 'FOK' }, 'smartMoney', meta);
+  if (fill.success) {
+    log('TRADE', `${modeTag()} Copied BUY $${fill.usd.toFixed(2)} (${fill.shares.toFixed(2)} sh @ ${fill.avgPrice.toFixed(3)}) from ${trade.traderAddress.slice(0, 8)}...${sized.reason ? ` [capped: ${sized.reason}]` : ''}`);
+    recordTrade(0, 'smartMoney', { market: meta.title, side: 'BUY', size: fill.shares, price: fill.avgPrice, wallet: trade.traderAddress });
+  } else {
+    log('WARN', `${modeTag()} Copy BUY failed: ${fill.error}`);
   }
 }
 
-/** Per-round cost tracking so DipArb can report realised PnL on merge / exit. */
+// ============================================================================
+// 2. ARBITRAGE (bot-driven execution with gas accounting)
+// ============================================================================
+
+let arbService: ArbitrageService | null = null;
+let lastArbExecution = 0;
+let arbExecuting = false;
+
+async function setupArbitrage() {
+  log('ARB', `Setting up Arbitrage Service ${modeTag()}...`);
+  state.arbitrage.status = 'idle';
+  updateDashboard();
+
+  arbService = new ArbitrageService({
+    privateKey: paper ? undefined : process.env.POLYMARKET_PRIVATE_KEY,
+    tradingClient: paper ?? undefined,
+    ctfClient: paper ?? undefined,
+    profitThreshold: CONFIG.arbitrage.profitThreshold,
+    minTradeSize: CONFIG.arbitrage.minTradeSize,
+    maxTradeSize: Math.min(CONFIG.arbitrage.maxTradeSize, CONFIG.capital.totalUsd * CONFIG.capital.strategyAllocation.arbitrage),
+    // The bot decides when to execute (risk gate, gas, sizing) - never the service
+    autoExecute: false,
+    enableRebalancer: CONFIG.arbitrage.enableRebalancer,
+    enableLogging: true,
+  });
+
+  arbService.on('opportunity', (opp: ArbitrageOpportunity) => { void handleArbOpportunity(opp); });
+
+  arbService.on('execution', (result: ArbitrageExecutionResult) => {
+    if (!result.success) log('WARN', `Arb execution failed: ${result.error}`);
+  });
+
+  if (CONFIG.arbitrage.enabled) await startArbitrageScan(CONFIG.arbitrage.minVolume24h);
+}
+
+async function startArbitrageScan(minVolume24h: number) {
+  if (!arbService) return;
+  state.arbitrage.status = 'scanning';
+  updateDashboard();
+  try {
+    const results = await arbService.scanMarkets({ minVolume24h }, CONFIG.arbitrage.profitThreshold);
+    state.arbitrage.marketsScanned = results.length;
+    const best = results.find(r => r.arbType !== 'none') || results[0];
+    if (best) {
+      await startArbitrageMarket(best.market);
+    } else {
+      state.arbitrage.status = 'idle';
+      log('ARB', 'No arbitrage markets found');
+    }
+  } catch (err) {
+    state.arbitrage.status = 'idle';
+    log('WARN', `Arbitrage scan error: ${(err as Error).message}`);
+  }
+  updateDashboard();
+}
+
+async function startArbitrageMarket(market: ArbitrageMarketConfig) {
+  if (!arbService) return;
+  paper?.registerMarket(market.conditionId, { yesTokenId: market.yesTokenId, noTokenId: market.noTokenId }, {
+    title: market.name, strategy: 'arbitrage', outcomes: market.outcomes,
+  });
+  await arbService.start(market);
+  state.activeArbMarket = market.name;
+  state.arbitrage.currentMarket = market.name;
+  state.arbitrage.status = 'monitoring';
+  log('ARB', `Monitoring: ${market.name}`);
+  updateDashboard();
+}
+
+async function handleArbOpportunity(opp: ArbitrageOpportunity) {
+  state.arbitrage.opportunitiesFound++;
+  state.arbitrage.lastOpportunity = {
+    timestamp: new Date().toISOString(),
+    type: opp.type,
+    profitPct: opp.profitRate,
+    market: state.arbitrage.currentMarket || 'Unknown',
+  };
+  updateDashboard();
+
+  if (!CONFIG.arbitrage.enabled || !CONFIG.arbitrage.autoExecute || !arbService) return;
+  if (arbExecuting || Date.now() - lastArbExecution < CONFIG.arbitrage.executionCooldownMs) return;
+  if (!canTrade()) return;
+
+  // Size: service recommendation, capped by dynamic sizing and exposure limits
+  const conditionId = arbService.getMarket()?.conditionId || 'arb';
+  const sized = sizeOrder('arbitrage', opp.recommendedSize, conditionId);
+  if (!sized.ok) {
+    log('INFO', `Arb skipped (${sized.reason})`);
+    return;
+  }
+  const size = Math.min(sized.usd, opp.recommendedSize);
+  if (size < CONFIG.arbitrage.minTradeSize) {
+    log('INFO', `Arb skipped: size $${size.toFixed(2)} < minTradeSize $${CONFIG.arbitrage.minTradeSize}`);
+    return;
+  }
+
+  // Gas accounting: a long arb costs a merge, a short arb a split (done by the rebalancer)
+  const gas = CONFIG.arbitrage.estimatedGasCostUSD;
+  const grossProfit = opp.profitRate * size;
+  const netProfit = grossProfit - gas;
+  if (netProfit < CONFIG.arbitrage.minNetProfit) {
+    log('INFO', `Arb skipped: net $${netProfit.toFixed(2)} (gross $${grossProfit.toFixed(2)} - gas $${gas.toFixed(2)}) < min $${CONFIG.arbitrage.minNetProfit}`);
+    return;
+  }
+
+  arbExecuting = true;
+  try {
+    log('ARB', `${modeTag()} Executing ${opp.type.toUpperCase()} arb: size $${size.toFixed(2)}, +${(opp.profitRate * 100).toFixed(2)}%, net est. $${netProfit.toFixed(2)}`);
+    const before = paper?.getRealizedPnl() ?? 0;
+    const result = await arbService.execute({ ...opp, recommendedSize: size });
+    lastArbExecution = Date.now();
+    if (result.success) {
+      // Paper: exact realised delta from the broker (fills + merge - gas). Live: service estimate minus gas.
+      const profit = paper ? paper.getRealizedPnl() - before : result.profit - gas;
+      paper?.save();
+      syncPaperToState();
+      state.merges++;
+      log('TRADE', `${modeTag()} Arb ${result.type} done: size $${result.size.toFixed(2)} | realised $${profit.toFixed(2)}`);
+      recordTrade(profit, 'arbitrage', { market: state.arbitrage.currentMarket || 'arb', side: 'BUY', size: result.size, price: 1 - opp.profitRate, txHash: result.txHashes[0] });
+    }
+  } catch (err) {
+    log('WARN', `Arb execution error: ${(err as Error).message}`);
+  } finally {
+    arbExecuting = false;
+  }
+}
+
+// ============================================================================
+// 3. DIP ARB (same DipArbService in both modes, paper clients injected in simulation)
+// ============================================================================
+
+let dipArb: DipArbService;
 const dipArbRounds = new Map<string, { leg1Cost: number; leg2Cost: number; shares: number }>();
 
-async function setupDipArb(sdk: PolymarketSDK) {
-  // Always setup listeners provided by this function
-  log('ARB', 'Setting up DipArb Service...');
+function createDipArbService(): DipArbService {
+  if (paper) {
+    return new DipArbService(sdk.realtime, paper, sdk.markets, undefined, 137, paper);
+  }
+  return sdk.dipArb;
+}
 
-  // Configure the DipArb service
-  sdk.dipArb.updateConfig({
+function registerDipArbMarket(market: DipArbMarketConfig) {
+  paper?.registerMarket(market.conditionId, { yesTokenId: market.upTokenId, noTokenId: market.downTokenId }, {
+    title: market.name, strategy: 'dipArb', outcomes: ['UP', 'DOWN'],
+  });
+}
+
+async function setupDipArb() {
+  log('ARB', `Setting up DipArb Service ${modeTag()}...`);
+  dipArb = createDipArbService();
+
+  dipArb.updateConfig({
     shares: CONFIG.dipArb.shares,
     sumTarget: CONFIG.dipArb.sumTarget,
-    autoExecute: !CONFIG.dryRun,
+    autoExecute: CONFIG.dipArb.autoExecute,
     debug: true,
   });
 
-  // Event handlers - listen to orderbookUpdate for live orderbook data
-  sdk.dipArb.on('orderbookUpdate', (update: {
-    upPrice: number;
-    downPrice: number;
-    sum: number;
-  }) => {
+  dipArb.on('orderbookUpdate', (update: { upPrice: number; downPrice: number; sum: number }) => {
     state.dipArb.upPrice = update.upPrice;
     state.dipArb.downPrice = update.downPrice;
     state.dipArb.sum = update.sum;
     updateDashboard();
   });
 
-  // Listen to 'started' event to sync market details immediately
-  sdk.dipArb.on('started', (market: any) => {
-    log('ARB', `DipArb Service Started Monitoring: ${market.name}`);
+  const onMarket = (market: DipArbMarketConfig) => {
+    registerDipArbMarket(market);
     state.activeDipArbMarket = market.name;
     state.dipArb.marketName = market.name;
     state.dipArb.underlying = market.underlying || 'ETH';
     state.dipArb.duration = `${market.durationMinutes}m`;
     state.dipArb.endTime = market.endTime ? new Date(market.endTime).getTime() : null;
-    state.dipArb.status = 'active'; // Force status update
+    state.dipArb.status = 'active';
     updateDashboard();
-
-    // Also notify dashboard specifically about status change
     dashboardEmitter.updateStrategyStatus('dipArb', 'active', market.name);
+  };
+
+  dipArb.on('started', (market: DipArbMarketConfig) => {
+    log('ARB', `DipArb monitoring: ${market.name}`);
+    onMarket(market);
   });
 
-  // Listen to newRound for round changes
-  sdk.dipArb.on('newRound', (round: { roundId: string; priceToBeat: number }) => {
+  dipArb.on('rotate', (e: { newMarket: string; market?: DipArbMarketConfig }) => {
+    log('ARB', `DipArb rotated to ${e.newMarket}`);
+    const m = dipArb.getMarket();
+    if (m) onMarket(m); else { state.activeDipArbMarket = e.newMarket; state.dipArb.marketName = e.newMarket; updateDashboard(); }
+  });
+
+  dipArb.on('newRound', (round: { roundId: string; priceToBeat: number }) => {
     log('ARB', `New round: ${round.roundId}, Price to Beat: ${round.priceToBeat}`);
+    // Risk gate: if trading is not allowed, keep the service from opening new legs this round
+    const allowed = canTrade();
+    dipArb.updateConfig({ autoExecute: CONFIG.dipArb.enabled && CONFIG.dipArb.autoExecute && allowed });
     updateDashboard();
   });
 
-  // Signal handler - extract data from DipArbLeg1Signal or DipArbLeg2Signal
-  sdk.dipArb.on('signal', (s: {
-    type: 'leg1' | 'leg2';
-    dipSide?: string;
-    hedgeSide?: string;
-    currentPrice: number;
-    source?: string;
-    dropPercent?: number;
-  }) => {
+  dipArb.on('signal', (s: { type: 'leg1' | 'leg2'; dipSide?: string; hedgeSide?: string; currentPrice: number; dropPercent?: number }) => {
     const side = s.dipSide || s.hedgeSide || 'UP';
     const signal: DipArbSignal = {
       id: `da-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
       timestamp: new Date().toISOString(),
-      type: s.type as DipArbSignal['type'],
+      type: s.type,
       side: side as 'UP' | 'DOWN',
       price: s.currentPrice || 0,
       change: s.dropPercent ? -s.dropPercent * 100 : 0,
     };
     state.dipArb.lastSignal = signal;
     state.dipArb.signals.unshift(signal);
-    if (state.dipArb.signals.length > 20) {
-      state.dipArb.signals = state.dipArb.signals.slice(0, 20);
-    }
-    log('SIGNAL', `DipArb: ${s.type} ${side} @ ${s.currentPrice?.toFixed(3)}`);
-
-    // NO SIMULATION on signal anymore - signals are not trades!
-    // We only want to track actual executions (which will fire the 'execution' event)
-
+    if (state.dipArb.signals.length > 20) state.dipArb.signals = state.dipArb.signals.slice(0, 20);
+    log('SIGNAL', `DipArb ${s.type} ${side} @ ${s.currentPrice?.toFixed(3)}`);
     updateDashboard();
   });
 
-  sdk.dipArb.on('execution', (r: {
-    success: boolean;
-    leg: 'leg1' | 'leg2' | 'merge' | 'exit';
-    roundId: string;
-    side?: string;
-    price?: number;
-    shares?: number;
-    error?: string;
-  }) => {
+  dipArb.on('execution', (r: { success: boolean; leg: 'leg1' | 'leg2' | 'merge' | 'exit'; roundId: string; side?: string; price?: number; shares?: number; error?: string }) => {
     if (!r.success) {
-      log('WARN', `DipArb Execution Failed (${r.leg}): ${r.error || 'Unknown error'}`);
+      log('WARN', `DipArb execution failed (${r.leg}): ${r.error || 'Unknown error'}`);
       return;
     }
-
+    paper?.save();
+    syncPaperToState();
     const priceStr = r.price ? r.price.toFixed(3) : '??';
     const sharesStr = r.shares ? r.shares.toFixed(1) : '??';
     const market = state.activeDipArbMarket || 'unknown-market';
     const round = dipArbRounds.get(r.roundId) || { leg1Cost: 0, leg2Cost: 0, shares: 0 };
+    const gas = CONFIG.arbitrage.estimatedGasCostUSD;
 
     switch (r.leg) {
       case 'leg1':
         round.leg1Cost = (r.price || 0) * (r.shares || 0);
         round.shares = r.shares || 0;
         dipArbRounds.set(r.roundId, round);
-        log('TRADE', `OPEN ${r.side} | ${sharesStr} shares @ $${priceStr} | ${market}`);
-        recordTrade(0, 'dipArb'); // position opened, outcome unknown
+        log('TRADE', `${modeTag()} DipArb OPEN ${r.side} | ${sharesStr} sh @ $${priceStr} | ${market}`);
+        recordTrade(0, 'dipArb', { market, side: 'BUY', size: r.shares, price: r.price });
         break;
       case 'leg2':
         round.leg2Cost = (r.price || 0) * (r.shares || 0);
         dipArbRounds.set(r.roundId, round);
-        log('TRADE', `HEDGE ${r.side} | ${sharesStr} shares @ $${priceStr} | pair cost $${(round.leg1Cost + round.leg2Cost).toFixed(2)}`);
-        recordTrade(0, 'dipArb');
+        log('TRADE', `${modeTag()} DipArb HEDGE ${r.side} | ${sharesStr} sh @ $${priceStr} | pair cost $${(round.leg1Cost + round.leg2Cost).toFixed(2)}`);
+        recordTrade(0, 'dipArb', { market, side: 'BUY', size: r.shares, price: r.price });
         break;
       case 'exit': {
-        // Timeout exit: leg1 sold at ~market price. Realised = proceeds - leg1 cost.
         const proceeds = (r.price || 0) * (r.shares || 0);
         const profit = round.leg1Cost > 0 ? proceeds - round.leg1Cost : 0;
         dipArbRounds.delete(r.roundId);
-        log('TRADE', `CLOSE ${r.side} (Timeout Exit) | ${sharesStr} shares @ $${priceStr} | realised $${profit.toFixed(2)}`);
-        recordTrade(profit, 'dipArb');
+        log('TRADE', `${modeTag()} DipArb CLOSE ${r.side} (timeout) | ${sharesStr} sh @ $${priceStr} | realised $${profit.toFixed(2)}`);
+        recordTrade(profit, 'dipArb', { market, side: 'SELL', size: r.shares, price: r.price });
         break;
       }
       case 'merge': {
-        // Each merged pair pays exactly $1. Realised = pairs - (leg1 + leg2 cost).
         const pairs = r.shares || round.shares;
         const cost = round.leg1Cost + round.leg2Cost;
-        const profit = cost > 0 ? pairs - cost : 0;
+        const profit = cost > 0 ? pairs - cost - gas : 0;
         dipArbRounds.delete(r.roundId);
-        log('TRADE', `MERGE | ${pairs.toFixed(1)} pairs → $${pairs.toFixed(2)} | cost $${cost.toFixed(2)} | realised $${profit.toFixed(2)} | ${market}`);
         state.merges++;
-        recordTrade(profit, 'dipArb');
+        log('TRADE', `${modeTag()} DipArb MERGE ${pairs.toFixed(1)} pairs → $${pairs.toFixed(2)} | cost $${cost.toFixed(2)} + gas $${gas.toFixed(2)} | realised $${profit.toFixed(2)}`);
+        recordTrade(profit, 'dipArb', { market, side: 'SELL', size: pairs, price: 1 });
         break;
       }
-      default:
-        log('TRADE', `DipArb ${r.leg}: ${r.side} @ ${priceStr}`);
-        recordTrade(0, 'dipArb');
     }
   });
 
-  sdk.dipArb.on('rotate', (e: { newMarket: string }) => {
-    state.activeDipArbMarket = e.newMarket;
-    state.dipArb.marketName = e.newMarket;
-    log('ARB', `DipArb rotated to ${e.newMarket}`);
-    updateDashboard();
+  dipArb.on('settled', (s: DipArbSettleResult) => {
+    paper?.save();
+    syncPaperToState();
+    if (!s.success) {
+      log('WARN', `DipArb settle failed for ${s.market?.name}: ${s.error}`);
+      return;
+    }
+    state.redeems++;
+    const received = s.amountReceived ?? 0;
+    // Redeem pays $1 per winning share; cost basis for unhedged rounds is unknown to the
+    // service, so use the last round costs we tracked for this market (best effort).
+    log('TRADE', `${modeTag()} DipArb REDEEM ${s.market?.name}: received $${received.toFixed(2)} (gas $${CONFIG.arbitrage.estimatedGasCostUSD})`);
+    if (paper) {
+      // Paper broker already booked the exact realised PnL of the redeem in its fills
+      const last = paper.getFills(1)[0];
+      if (last?.kind === 'REDEEM') recordTrade(last.realizedPnl, 'dipArb', { market: s.market?.name, side: 'SELL', size: last.shares, price: last.avgPrice });
+    } else {
+      recordTrade(-CONFIG.arbitrage.estimatedGasCostUSD, 'dipArb', { market: s.market?.name, side: 'SELL', size: received, price: 1 });
+    }
   });
 
-  // Enable auto-rotate if configured
   if (CONFIG.dipArb.autoRotate) {
-    sdk.dipArb.enableAutoRotate({
+    dipArb.enableAutoRotate({
       enabled: true,
-      underlyings: ['ETH', 'BTC', 'SOL'],
+      underlyings: [...CONFIG.dipArb.coins],
       duration: '15m',
       settleStrategy: 'redeem',
       redeemWaitMinutes: 5,
     });
   }
 
-  // Find and start monitoring a market
-  if (CONFIG.dipArb.enabled) {
-    try {
-      const market = await sdk.dipArb.findAndStart({ coin: 'ETH', preferDuration: '15m' });
-      if (market) {
-        state.activeDipArbMarket = market.name;
-        state.dipArb.marketName = market.name;
-        state.dipArb.underlying = market.underlying || 'ETH';
-        state.dipArb.duration = `${market.durationMinutes}m`;
-        // endTime is a Date object, convert to timestamp
-        state.dipArb.endTime = market.endTime ? new Date(market.endTime).getTime() : null;
-        state.dipArb.status = 'active'; // Force status update
-        log('ARB', `DipArb started: ${market.name}`);
-      } else {
-        log('WARN', 'No DipArb markets found');
-      }
-      updateDashboard();
-    } catch (err) {
-      log('WARN', `DipArb setup error: ${(err as Error).message}`);
-    }
-  }
+  if (CONFIG.dipArb.enabled) await startDipArb();
 }
 
-let swapService: SwapService | null = null;
-
-async function updateBalances() {
-  if (CONFIG.dryRun) {
-    // SIMULATION: Mock balances
-    // Base 10,000 + whatever PnL we've made in this session
-    state.usdcEBalance = 10000 + state.totalPnL;
-    state.maticBalance = 100;
-
-    // Only verify once/log sparsely
-    if (Math.random() < 0.05) { // Occasional log
-      // no-op
-    }
-    updateDashboard();
-    return;
-  }
-
-  if (!swapService) return;
+async function startDipArb() {
   try {
-    const balances = await swapService.getBalances();
-    let changed = false;
-
-    // Parse balances from TokenBalance array
-    for (const b of balances) {
-      if (b.symbol === 'MATIC') {
-        const val = parseFloat(b.balance);
-        if (state.maticBalance !== val) { state.maticBalance = val; changed = true; }
-      }
-      if (b.symbol === 'USDC') {
-        const val = parseFloat(b.balance);
-        if (state.usdcBalance !== val) { state.usdcBalance = val; changed = true; }
-      }
-      if (b.symbol === 'USDC_E') {
-        const val = parseFloat(b.balance);
-        if (state.usdcEBalance !== val) { state.usdcEBalance = val; changed = true; }
-      }
-    }
-
-    if (changed) {
-      updateDashboard();
-      // Optional: Log only on significant changes or debug
-      // log('SWAP', 'Balances updated');
-    }
+    const market = await dipArb.findAndStart({ coin: CONFIG.dipArb.coins[0], preferDuration: '15m' });
+    if (market) log('ARB', `DipArb started: ${market.name}`);
+    else log('WARN', 'No DipArb markets found');
   } catch (err) {
-    // Silent fail on interval to avoid log spam
+    log('WARN', `DipArb setup error: ${(err as Error).message}`);
   }
+  updateDashboard();
 }
 
-async function setupSwap() {
-  log('SWAP', 'Setting up Wallet & Balance Monitor...');
+// ============================================================================
+// 4. DIRECT TRADING (Binance trend) + EXIT MANAGER
+// ============================================================================
 
-  try {
-    if (!process.env.POLYMARKET_PRIVATE_KEY) return;
-
-    // Create SwapService with signer
-    const provider = new ethers.providers.JsonRpcProvider('https://polygon-rpc.com');
-    const signer = new ethers.Wallet(process.env.POLYMARKET_PRIVATE_KEY, provider);
-    swapService = new SwapService(signer);
-
-    // Initial fetch
-    await updateBalances();
-
-    log('SWAP', 'Balances:', {
-      matic: state.maticBalance.toFixed(4),
-      usdce: `$${state.usdcEBalance.toFixed(2)}`,
-    });
-
-    // Check for low USDC.e (Bridged) balance
-    if (!CONFIG.dryRun && state.usdcEBalance < 5) {
-      log('WARN', `⚠️ Low USDC.e balance ($${state.usdcEBalance.toFixed(2)}). Bot requires USDC.e (Bridged USDC) on Polygon.`);
-      log('WARN', `ℹ️ Please deposit USDC.e or swap your Native USDC to USDC.e manually.`);
-    }
-
-    // Poll balances every 30 seconds
-    setInterval(updateBalances, 30000);
-
-    updateDashboard();
-  } catch (err) {
-    log('WARN', `Balance setup error: ${(err as Error).message}`);
-  }
-}
-
-async function setupOnchain() {
-  if (!CONFIG.onchain.enabled || CONFIG.dryRun) return;
-  log('CHAIN', 'Checking on-chain approvals...');
-
-  try {
-    if (!process.env.POLYMARKET_PRIVATE_KEY) return;
-
-    const onchain = new OnchainService({
-      privateKey: process.env.POLYMARKET_PRIVATE_KEY,
-      rpcUrl: 'https://polygon-rpc.com',
-    });
-
-    if (CONFIG.onchain.autoApprove) {
-      log('CHAIN', 'Auto-approving Proxy and Exchange...');
-      const result = await onchain.approveAll();
-
-      if (result.allApproved) {
-        log('CHAIN', '✅ All approvals ready');
-      } else {
-        log('WARN', `Approval status: ${result.summary}`);
-        // Log individual failures
-        result.erc20Approvals.forEach(r => {
-          if (!r.success) log('WARN', `❌ ERC20 Approval failed: ${r.contract} - ${r.error}`);
-        });
-        result.erc1155Approvals.forEach(r => {
-          if (!r.success) log('WARN', `❌ ERC1155 Approval failed: ${r.contract} - ${r.error}`);
-        });
-      }
-    } else {
-      const status = await onchain.checkAllowances();
-      if (!status.tradingReady) {
-        log('WARN', 'Missing approvals:', status.issues);
-        log('WARN', 'Enable onchain.autoApprove=true to fix automatically');
-      } else {
-        log('CHAIN', '✅ Approvals verified');
-      }
-    }
-  } catch (err) {
-    log('WARN', `Onchain setup error: ${(err as Error).message}`);
-  }
-}
-
-async function setupBinanceAnalysis(sdk: PolymarketSDK) {
+async function setupBinanceAnalysis() {
   if (!CONFIG.binance.enabled) return;
   log('KLINE', 'Setting up Binance K-line analysis...');
 
@@ -941,15 +1157,11 @@ async function setupBinanceAnalysis(sdk: PolymarketSDK) {
     try {
       const klines = await sdk.binance.getKLines(symbol, CONFIG.binance.interval, { limit: 20 });
       if (klines.length < 10) return 'neutral';
-
       const recent = klines.slice(-5);
       const older = klines.slice(-10, -5);
-
       const recentAvg = recent.reduce((s, k) => s + k.close, 0) / recent.length;
       const olderAvg = older.reduce((s, k) => s + k.close, 0) / older.length;
-
       const change = (recentAvg - olderAvg) / olderAvg;
-
       if (change > CONFIG.binance.trendThreshold / 100) return 'up';
       if (change < -CONFIG.binance.trendThreshold / 100) return 'down';
       return 'neutral';
@@ -968,188 +1180,262 @@ async function setupBinanceAnalysis(sdk: PolymarketSDK) {
 
   await updateTrends();
   setInterval(updateTrends, 5 * 60 * 1000);
-  await updateTrends();
-  setInterval(updateTrends, 5 * 60 * 1000);
 }
 
-const CRYPTO_MARKET_RE = /\b(btc|bitcoin|eth|ethereum|ether|sol|solana)\b/i;
+function exitRules(): ExitRules {
+  const d = CONFIG.directTrading;
+  return { stopLossPct: d.stopLossPct, takeProfitPct: d.takeProfitPct, trailingStopPct: d.trailingStopPct, maxHoldDays: d.maxHoldDays };
+}
 
-async function setupDirectTrading(sdk: PolymarketSDK) {
-  log('INFO', 'Direct trading setup complete - waiting for toggle');
-
-  if (CONFIG.directTrading.enabled) {
-    if (CONFIG.dryRun) {
-      log('INFO', 'Direct trading enabled (simulation mode)');
-    } else {
-      log('INFO', 'Direct trading enabled - will place orders based on trend analysis');
-    }
+async function setupDirectTrading() {
+  const d = CONFIG.directTrading;
+  const riskReward = d.stopLossPct > 0 ? d.takeProfitPct / d.stopLossPct : Infinity;
+  if (riskReward < d.minRiskReward) {
+    log('WARN', `Direct trading disabled: take-profit/stop-loss ratio ${riskReward.toFixed(2)} < minRiskReward ${d.minRiskReward}`);
+    d.enabled = false;
   }
+  log('INFO', `Direct trading ${d.enabled ? 'enabled' : 'waiting for toggle'} (SL ${d.stopLossPct * 100}% / TP ${d.takeProfitPct * 100}% / trail ${d.trailingStopPct * 100}% / max ${d.maxHoldDays}d)`);
 
   async function checkTrendTrades() {
-    if (!CONFIG.directTrading.enabled) return;
+    if (!CONFIG.directTrading.enabled || !CONFIG.directTrading.trendFollowing) return;
     if (!canTrade()) return;
 
     try {
       const trendingMarkets = await sdk.gammaApi.getTrendingMarkets(5);
-
       for (const market of trendingMarkets) {
         if (!market.conditionId) continue;
+        const question = market.question || '';
+        if (!CRYPTO_MARKET_RE.test(question)) continue;
+
+        let trend: 'up' | 'down' | 'neutral' = 'neutral';
+        if (/\b(btc|bitcoin)\b/i.test(question)) trend = state.btcTrend;
+        else if (/\b(eth|ethereum|ether)\b/i.test(question)) trend = state.ethTrend;
+        else if (/\b(sol|solana)\b/i.test(question)) trend = state.solTrend;
+        if (trend === 'neutral') continue;
 
         try {
-          const fullMarket = await sdk.getMarket(market.conditionId);
-          const yesToken = fullMarket.tokens.find(t => t.outcome === 'Yes');
-          const noToken = fullMarket.tokens.find(t => t.outcome === 'No');
-
+          const full = await sdk.getMarket(market.conditionId);
+          const yesToken = full.tokens.find(t => t.outcome === 'Yes');
+          const noToken = full.tokens.find(t => t.outcome === 'No');
           if (!yesToken || !noToken) continue;
+          const target = trend === 'up' ? yesToken : noToken;
 
-          // Whole-word match only: the previous pattern matched "method",
-          // "whether", "resolve", "solar"... and bought unrelated markets.
-          const question = market.question || '';
-          const isCryptoMarket = CRYPTO_MARKET_RE.test(question);
+          if (openTrades().some(t => t.tokenId === target.tokenId)) continue; // already in
 
-          if (isCryptoMarket && CONFIG.directTrading.trendFollowing) {
-            let trend: 'up' | 'down' | 'neutral' = 'neutral';
-            if (/\b(btc|bitcoin)\b/i.test(question)) trend = state.btcTrend;
-            else if (/\b(eth|ethereum|ether)\b/i.test(question)) trend = state.ethTrend;
-            else if (/\b(sol|solana)\b/i.test(question)) trend = state.solTrend;
+          const sized = sizeOrder('direct', CONFIG.capital.totalUsd * positionPct(), market.conditionId);
+          if (!sized.ok) { log('INFO', `Direct trade skipped (${sized.reason})`); continue; }
 
-            if (trend !== 'neutral') {
-              // Strategy: 
-              // UP -> Expect YES to win -> Buy YES
-              // DOWN -> Expect YES to lose -> Buy NO
-              const targetToken = trend === 'up' ? yesToken : noToken;
-              const side = 'BUY'; // We always BUY the outcome we believe in
-              const price = targetToken.price;
-
-              if (CONFIG.dryRun) {
-                // Simulate the trade in DRY RUN mode
-                simulateTrade(0, 'direct', `Trend signal: ${market.question?.slice(0, 40)}... → ${trend.toUpperCase()} (Buy ${targetToken.outcome}) @ ${price.toFixed(2)}`);
-                state.directTrades = (state.directTrades ?? 0) + 1;
-                updateDashboard();
-              } else {
-                // Live Mode Execution
-                const amountUsdc = 5; // Fixed small size for testing ($5)
-
-                log('SIGNAL', `Executing Trend Trade: ${trend.toUpperCase()} on ${market.question?.slice(0, 30)}...`);
-
-                sdk.tradingService.createMarketOrder({
-                  tokenId: targetToken.tokenId,
-                  side: 'BUY',
-                  amount: amountUsdc
-                }).then(res => {
-                  if (res.success) {
-                    log('TRADE', `✅ Direct Trade: Bought $${amountUsdc} of ${targetToken.outcome} @ ~${price.toFixed(2)}`);
-                    recordTrade(0, 'direct');
-                  } else {
-                    log('WARN', `❌ Direct Trade failed: ${res.errorMsg}`);
-                  }
-                });
-              }
-            }
+          const limit = Math.min(0.99, target.price * (1 + CONFIG.smartMoney.maxSlippage));
+          const meta = { conditionId: market.conditionId, outcome: target.outcome, title: question };
+          log('SIGNAL', `${modeTag()} Trend ${trend.toUpperCase()} → BUY ${target.outcome} $${sized.usd.toFixed(2)} on "${question.slice(0, 50)}"`);
+          const fill = await placeOrder({ tokenId: target.tokenId, side: 'BUY', amount: sized.usd, price: limit, orderType: 'FOK' }, 'direct', meta);
+          if (fill.success) {
+            log('TRADE', `${modeTag()} Direct BUY ${fill.shares.toFixed(2)} ${target.outcome} @ ${fill.avgPrice.toFixed(3)}`);
+            recordTrade(0, 'direct', { market: question, side: 'BUY', size: fill.shares, price: fill.avgPrice });
+          } else {
+            log('WARN', `${modeTag()} Direct BUY failed: ${fill.error}`);
           }
-        } catch { /* skip */ }
+        } catch (err) {
+          log('WARN', `Direct trade error: ${(err as Error).message}`);
+        }
       }
     } catch (err) {
       log('WARN', `Direct trading error: ${(err as Error).message}`);
     }
   }
 
-  // Check every 5 minutes
   setInterval(checkTrendTrades, 5 * 60 * 1000);
-  // Initial check after 10 seconds (let trends stabilize)
   setTimeout(checkTrendTrades, 10000);
 }
 
-async function setupPortfolioManager(sdk: PolymarketSDK) {
-  log('INFO', 'Starting Portfolio Manager...');
+/**
+ * Exit manager: stop-loss / take-profit / trailing / max-hold on direct trades,
+ * and auto-redeem of resolved markets for every strategy the bot opened
+ * (DipArb settles its own rounds through the service).
+ */
+async function manageExits() {
+  const trades = openTrades().filter(t => t.strategy !== 'dipArb');
+  if (trades.length === 0) return;
 
-  // Initial Sync
-  try {
-    const positions = await sdk.wallets.getWalletPositions(sdk.tradingService.getAddress());
-    state.positions = positions;
-    log('WALLET', `Synced ${positions.length} existing positions.`);
-    updateDashboard();
-  } catch (err: any) {
-    log('WARN', `Portfolio Sync failed: ${err.message}`);
-  }
-
-  // Periodic Position Sync (Every 30s)
-  setInterval(async () => {
+  const resolutionChecks = new Map<string, Promise<MarketResolution>>();
+  for (const trade of trades) {
     try {
-      const positions = await sdk.wallets.getWalletPositions(sdk.tradingService.getAddress());
-
-      // Enrich positions with market data (to check if won or lost)
-      const enrichedPositions = await Promise.all(positions.map(async (pos: any) => {
-        try {
-          // Use cached market data if available
-          const market = await sdk.markets.getMarket(pos.conditionId);
-          if (market) {
-            pos.marketClosed = market.closed;
-
-            // Enrich with current price for PnL
-            // Try to find the token in the market outcomes
-            const token = market.tokens.find((t: any) => t.tokenId === pos.asset);
-
-            if (token) {
-              pos.isWinner = token.winner || false;
-              // Store current price for frontend
-              pos.curPrice = token.price || 0;
-            }
-
-            // If market is closed but winner info is missing/false, assume lost unless proven otherwise
-            if (market.closed && !pos.isWinner) {
-              // Double check if ANY token won (if market resolved)
-            }
-          }
-        } catch (e) {
-          // Ignore market fetch errors, keep basic pos data
+      // 1. Resolved market → redeem
+      if (!resolutionChecks.has(trade.conditionId)) resolutionChecks.set(trade.conditionId, marketResolution(trade.conditionId));
+      const resolution = await resolutionChecks.get(trade.conditionId)!;
+      if (resolution.isResolved) {
+        const pnl = await redeemTrade(trade);
+        if (pnl !== null) {
+          state.redeems++;
+          log('TRADE', `${modeTag()} Redeemed ${trade.title.slice(0, 40)} (${resolution.winningOutcome} won) | realised $${pnl.toFixed(2)}`);
+          recordTrade(pnl, trade.strategy === 'manual' ? 'direct' : trade.strategy, { market: trade.title, side: 'SELL', size: trade.shares, price: resolution.winningOutcome === trade.outcome.toUpperCase() ? 1 : 0 });
         }
-        return pos;
-      }));
-
-      // Calculate Unrealized PnL
-      let unrealized = 0;
-      for (const p of enrichedPositions) {
-        const entry = Number(p.avgPrice) || 0;
-        const current = Number(p.curPrice) || Number(p.msg_price) || 0;
-        const size = Number(p.size) || 0;
-
-        if (current > 0 && size > 0) {
-          unrealized += (current - entry) * size;
-        }
+        continue;
       }
-      state.unrealizedPnL = unrealized;
 
-      // Update Total PnL display to include Unrealized? 
-      // User requested "P&L total is still not updating".
-      // Usually Total = Realized + Unrealized.
-      // But we keep them separate in state, let frontend decide how to show.
+      // 2. Exit rules on direct trades
+      if (trade.strategy !== 'direct') continue;
+      const price = await fetchMidPrice(trade.tokenId);
+      if (price === null) continue;
+      const peak = Math.max(trade.peakPrice, price);
+      if (paper) paper.markToMarket(new Map([[trade.tokenId, price]]));
+      else { const e = liveTrades.get(trade.tokenId); if (e) e.peakPrice = peak; }
 
-      state.positions = enrichedPositions;
-      updateDashboard();
-    } catch (err: any) {
-      log('WARN', `Portfolio sync error: ${err.message}`);
+      const reason = evaluateExit({ entryPrice: trade.entryPrice, peakPrice: peak, openedAt: trade.openedAt }, price, Date.now(), exitRules());
+      if (!reason) continue;
+
+      const limit = Math.max(0.01, price * (1 - CONFIG.smartMoney.maxSlippage));
+      const fill = await placeOrder({ tokenId: trade.tokenId, side: 'SELL', amount: trade.shares, price: limit, orderType: 'FAK' }, 'direct', { conditionId: trade.conditionId, outcome: trade.outcome, title: trade.title });
+      if (fill.success) {
+        const pnl = fill.realizedPnl ?? (fill.avgPrice - trade.entryPrice) * fill.shares;
+        log('TRADE', `${modeTag()} ${reason.toUpperCase()} on ${trade.title.slice(0, 40)}: sold ${fill.shares.toFixed(2)} @ ${fill.avgPrice.toFixed(3)} (entry ${trade.entryPrice.toFixed(3)}) | realised $${pnl.toFixed(2)}`);
+        recordTrade(pnl, 'direct', { market: trade.title, side: 'SELL', size: fill.shares, price: fill.avgPrice });
+      } else {
+        log('WARN', `${modeTag()} ${reason} exit failed on ${trade.title.slice(0, 40)}: ${fill.error}`);
+      }
+    } catch (err) {
+      log('WARN', `Exit manager error on ${trade.title.slice(0, 30)}: ${(err as Error).message}`);
     }
-  }, 30 * 1000);
+  }
+  if (liveTrades.size) saveLiveTrades();
 }
 
-async function main() {
-  console.clear();
-  console.log('╔════════════════════════════════════════════════════════════════════╗');
-  console.log('║          POLYMARKET BOT v3.0 + DASHBOARD                           ║');
-  console.log('╚════════════════════════════════════════════════════════════════════╝\n');
+// ============================================================================
+// WALLET, APPROVALS, PORTFOLIO
+// ============================================================================
 
-  // Start Dashboard Server
-  startDashboard(3001);
-  console.log('\n🌐 Dashboard: http://localhost:3001\n');
+let swapService: SwapService | null = null;
 
-  if (!process.env.POLYMARKET_PRIVATE_KEY) {
-    log('ERROR', 'POLYMARKET_PRIVATE_KEY not found');
-    process.exit(1);
+async function updateBalances() {
+  if (paper) { syncPaperToState(); updateDashboard(); return; }
+  if (!swapService) return;
+  try {
+    const balances = await swapService.getBalances();
+    let changed = false;
+    for (const b of balances) {
+      const val = parseFloat(b.balance);
+      if (b.symbol === 'MATIC' && state.maticBalance !== val) { state.maticBalance = val; changed = true; }
+      if (b.symbol === 'USDC' && state.usdcBalance !== val) { state.usdcBalance = val; changed = true; }
+      if (b.symbol === 'USDC_E' && state.usdcEBalance !== val) { state.usdcEBalance = val; changed = true; }
+    }
+    if (changed) updateDashboard();
+  } catch { /* silent on interval */ }
+}
+
+async function setupSwap() {
+  if (paper) return;
+  log('SWAP', 'Setting up Wallet & Balance Monitor...');
+  try {
+    if (!process.env.POLYMARKET_PRIVATE_KEY) return;
+    const provider = new ethers.providers.JsonRpcProvider('https://polygon-rpc.com');
+    const signer = new ethers.Wallet(process.env.POLYMARKET_PRIVATE_KEY, provider);
+    swapService = new SwapService(signer);
+    await updateBalances();
+    log('SWAP', 'Balances:', { matic: state.maticBalance.toFixed(4), usdce: `$${state.usdcEBalance.toFixed(2)}` });
+    if (state.usdcEBalance < 5) {
+      log('WARN', `⚠️ Low USDC.e balance ($${state.usdcEBalance.toFixed(2)}). The bot trades USDC.e (bridged USDC) on Polygon.`);
+    }
+    if (state.maticBalance < CONFIG.onchain.minMatic) {
+      log('WARN', `⚠️ Low MATIC (${state.maticBalance.toFixed(3)} < ${CONFIG.onchain.minMatic}): merges/redeems will fail without gas.`);
+    }
+    setInterval(updateBalances, 30000);
+    updateDashboard();
+  } catch (err) {
+    log('WARN', `Balance setup error: ${(err as Error).message}`);
   }
+}
 
-  // Send config to dashboard
-  const dashboardConfig: BotConfig = {
+async function setupOnchain() {
+  if (!CONFIG.onchain.enabled || paper) return;
+  log('CHAIN', 'Checking on-chain approvals...');
+  try {
+    if (!process.env.POLYMARKET_PRIVATE_KEY) return;
+    const onchain = new OnchainService({ privateKey: process.env.POLYMARKET_PRIVATE_KEY, rpcUrl: 'https://polygon-rpc.com' });
+    if (CONFIG.onchain.autoApprove) {
+      log('CHAIN', 'Auto-approving Exchange contracts (unlimited USDC.e allowance + CTF operator)...');
+      const result = await onchain.approveAll();
+      if (result.allApproved) log('CHAIN', '✅ All approvals ready');
+      else {
+        log('WARN', `Approval status: ${result.summary}`);
+        result.erc20Approvals.forEach(r => { if (!r.success) log('WARN', `❌ ERC20 approval failed: ${r.contract} - ${r.error}`); });
+        result.erc1155Approvals.forEach(r => { if (!r.success) log('WARN', `❌ ERC1155 approval failed: ${r.contract} - ${r.error}`); });
+      }
+    } else {
+      const status = await onchain.checkAllowances();
+      if (!status.tradingReady) log('WARN', 'Missing approvals:', status.issues);
+      else log('CHAIN', '✅ Approvals verified');
+    }
+  } catch (err) {
+    log('WARN', `Onchain setup error: ${(err as Error).message}`);
+  }
+}
+
+/** Positions view: live from the Data API, simulation from the paper broker (marked to market). */
+async function syncPortfolio() {
+  try {
+    if (paper) {
+      const positions = paper.getPositions();
+      const prices = new Map<string, number>();
+      await Promise.all(positions.map(async p => {
+        const mid = await fetchMidPrice(p.tokenId);
+        if (mid !== null) prices.set(p.tokenId, mid);
+      }));
+      paper.markToMarket(prices);
+      state.positions = paper.getPositions().map(p => {
+        const cur = p.lastPrice ?? p.avgCost;
+        return {
+          asset: p.tokenId,
+          conditionId: p.conditionId,
+          outcome: p.outcome,
+          size: p.shares,
+          avgPrice: p.avgCost,
+          curPrice: cur,
+          cashPnl: (cur - p.avgCost) * p.shares,
+          percentPnl: p.avgCost > 0 ? ((cur - p.avgCost) / p.avgCost) * 100 : 0,
+          title: p.title || p.conditionId,
+          slug: p.strategy,
+          marketClosed: false,
+          isWinner: false,
+        };
+      });
+      syncPaperToState();
+      updateDashboard();
+      return;
+    }
+
+    const positions = await sdk.wallets.getWalletPositions(sdk.tradingService.getAddress());
+    const enriched = await Promise.all(positions.map(async (pos: any) => {
+      try {
+        const market = await sdk.markets.getMarket(pos.conditionId);
+        if (market) {
+          pos.marketClosed = market.closed;
+          const token = market.tokens.find((t: any) => t.tokenId === pos.asset);
+          if (token) { pos.isWinner = token.winner || false; pos.curPrice = token.price || 0; }
+        }
+      } catch { /* keep basic data */ }
+      return pos;
+    }));
+    let unrealized = 0;
+    for (const p of enriched) {
+      const entry = Number(p.avgPrice) || 0;
+      const current = Number(p.curPrice) || 0;
+      const size = Number(p.size) || 0;
+      if (current > 0 && size > 0) unrealized += (current - entry) * size;
+    }
+    state.unrealizedPnL = unrealized;
+    state.positions = enriched;
+    updateDashboard();
+  } catch (err) {
+    log('WARN', `Portfolio sync error: ${(err as Error).message}`);
+  }
+}
+
+// ============================================================================
+// DASHBOARD CONFIG / COMMANDS
+// ============================================================================
+
+function dashboardConfig(): BotConfig {
+  return {
     capital: CONFIG.capital,
     risk: CONFIG.risk,
     smartMoney: {
@@ -1160,396 +1446,259 @@ async function main() {
       minTrades: CONFIG.smartMoney.minTrades,
       customWallets: CONFIG.smartMoney.customWallets,
     },
-    arbitrage: {
-      enabled: CONFIG.arbitrage.enabled,
-      profitThreshold: CONFIG.arbitrage.profitThreshold,
-      autoExecute: CONFIG.arbitrage.autoExecute,
-    },
-    dipArb: {
-      enabled: CONFIG.dipArb.enabled,
-      coins: CONFIG.dipArb.coins,
-    },
-    directTrading: {
-      enabled: CONFIG.directTrading.enabled,
-    },
-    binance: {
-      enabled: CONFIG.binance.enabled,
-    },
+    arbitrage: { enabled: CONFIG.arbitrage.enabled, profitThreshold: CONFIG.arbitrage.profitThreshold, autoExecute: CONFIG.arbitrage.autoExecute },
+    dipArb: { enabled: CONFIG.dipArb.enabled, coins: CONFIG.dipArb.coins },
+    directTrading: { enabled: CONFIG.directTrading.enabled },
+    binance: { enabled: CONFIG.binance.enabled },
     dryRun: CONFIG.dryRun,
   };
-  dashboardEmitter.updateConfig(dashboardConfig);
-  dashboardEmitter.updateState(state);
+}
 
-  log('INFO', 'Configuration', {
-    binance: CONFIG.binance.enabled,
-  });
+async function switchMode(wantDryRun: boolean) {
+  if (CONFIG.dryRun === wantDryRun) return;
+  if (!wantDryRun && (ALLOW_LIVE_TOGGLE !== 'true' || !process.env.POLYMARKET_PRIVATE_KEY)) {
+    log('ERROR', 'Refused: switching to LIVE from the dashboard is disabled. Set ALLOW_DASHBOARD_LIVE_TOGGLE=true and a private key in .env, or restart with DRY_RUN=false.');
+    return;
+  }
+  log('WARN', `Switching to ${wantDryRun ? 'SIMULATION' : 'LIVE'} mode (requested from dashboard)...`);
 
-  // Handle Dashboard Commands
-  dashboardEmitter.on('command', async (cmd: { command: string; payload: any }) => {
-    if (cmd.command === 'toggleDryRun') {
-      // payload.enabled is the desired value of CONFIG.dryRun
-      const wantDryRun = !!(cmd.payload && cmd.payload.enabled);
-      if (CONFIG.dryRun !== wantDryRun) {
-        log('INFO', `Switching to ${wantDryRun ? 'DRY RUN' : 'LIVE'} mode... (Requested by user)`);
+  // Stop strategies on the old execution layer
+  persistRisk();
+  paper?.save();
+  stopSmartMoney();
+  if (arbService) await arbService.stop();
+  await dipArb.stop();
+  dipArbRounds.clear();
 
-        if (!wantDryRun && ALLOW_LIVE_TOGGLE !== 'true') {
-          log('ERROR', 'Refused: switching to LIVE from the dashboard is disabled. Set ALLOW_DASHBOARD_LIVE_TOGGLE=true in .env, or restart the bot with DRY_RUN=false.');
-          return;
-        }
-
-        // Persist the risk state of the mode we are leaving, then load the other one
-        persistRisk();
-        CONFIG.dryRun = wantDryRun;
-        loadRiskForCurrentMode();
-
-        // Update State paper wallet
-        if (CONFIG.dryRun && !state.paper) {
-          state.paper = {
-            balance: CONFIG.capital.totalUsd,
-            initialBalance: CONFIG.capital.totalUsd,
-            pnl: 0,
-            trades: 0,
-            totalVolume: 0,
-          };
-        }
-
-        // Re-configure Services
-
-        // 0. Going live: make sure approvals and balance monitoring exist
-        if (!CONFIG.dryRun) {
-          await setupOnchain();
-          if (!swapService) await setupSwap();
-          await updateBalances();
-        }
-
-        // 1. Arbitrage Service (Needs restart to update signer/sim mode)
-        if (arbService) {
-          // Update internal flags if possible without full restart?
-          // ArbitrageService takes readonly config in constructor. Better to re-create.
-          await arbService.stop();
-          // Re-run setup
-          await setupArbitrage(sdk);
-        }
-
-        // 2. DipArb (Update config)
-        sdk.dipArb.updateConfig({
-          autoExecute: !CONFIG.dryRun, // Live = autoExecute true (if config enabled)
-        });
-
-        // Emit new config to dashboard
-        const newDashboardConfig: BotConfig = {
-          capital: CONFIG.capital,
-          risk: CONFIG.risk,
-          smartMoney: { ...CONFIG.smartMoney },
-          arbitrage: { ...CONFIG.arbitrage },
-          dipArb: { ...CONFIG.dipArb },
-          directTrading: { ...CONFIG.directTrading },
-          binance: { ...CONFIG.binance },
-          dryRun: CONFIG.dryRun,
-        };
-        dashboardEmitter.updateConfig(newDashboardConfig);
-
-        log('WARN', `⚠️ BOT MODE CHANGED TO: ${CONFIG.dryRun ? '🧪 DRY RUN' : '🔴 LIVE'}`);
-      }
-    }
-  });
-
-  // Restore persisted risk counters (pauses and permanent halts survive restarts)
+  CONFIG.dryRun = wantDryRun;
+  if (CONFIG.dryRun) {
+    setupPaperBroker();
+  } else {
+    // The SDK was built without CLOB credentials in simulation: initialise now
+    await sdk.initialize();
+    paper = null;
+    state.paper = undefined;
+    liveCtf = new CTFClient({ privateKey: process.env.POLYMARKET_PRIVATE_KEY! });
+    loadLiveTrades();
+    await setupOnchain();
+    await setupSwap();
+  }
   loadRiskForCurrentMode();
 
-  // Initialize Paper Wallet if Dry Run
-  if (CONFIG.dryRun) {
-    state.paper = {
-      balance: CONFIG.capital.totalUsd,
-      initialBalance: CONFIG.capital.totalUsd,
-      pnl: 0,
-      trades: 0,
-      totalVolume: 0,
-    };
-    log('INFO', '📝 Paper Trading Activated: Simulating trades with $250 initial capital');
-    updateDashboard();
-  }
+  await setupArbitrage();
+  await setupDipArb();
+  if (CONFIG.smartMoney.enabled) await initializeSmartMoney();
+  await syncPortfolio();
 
-  const sdk = await PolymarketSDK.create({
-    privateKey: process.env.POLYMARKET_PRIVATE_KEY,
-  });
+  dashboardEmitter.updateConfig(dashboardConfig());
+  log('WARN', `⚠️ BOT MODE IS NOW: ${CONFIG.dryRun ? '🧪 SIMULATION' : '🔴 LIVE'}`);
+}
 
-  log('INFO', `Wallet: ${sdk.tradingService.getAddress()}`);
-
-  // Setup all services
-  await setupOnchain(); // MUST BE FIRST (Approvals)
-  await setupSwap();
-  await setupBinanceAnalysis(sdk);
-  await setupSmartMoney(sdk);
-  await setupArbitrage(sdk);
-  await setupDipArb(sdk);
-
-  // Periodic state update
-  setInterval(() => {
-    updateDashboard();
-  }, 5000);
-
-  // Setup Direct Trading
-  await setupDirectTrading(sdk);
-
-  // Setup Portfolio Manager (Persistence)
-  await setupPortfolioManager(sdk);
-
-  // Listen for commands from dashboard
+function setupDashboardCommands() {
   dashboardEmitter.on('command', async ({ command, payload }: { command: string; payload: any }) => {
-    if (command === 'closePosition') {
-      const { tokenId, size } = payload;
-      log('TRADE', `Closing position: ${tokenId} (${size} shares)`);
-
-      if (CONFIG.dryRun) {
-        log('TRADE', `[SIMULATION] Would sell ${size} shares of ${tokenId}`);
+    try {
+      if (command === 'toggleDryRun') {
+        await switchMode(!!(payload && payload.enabled));
         return;
       }
 
-      try {
-        // Estimate PnL before closing (using cached data)
-        const position = state.positions.find(p => p.asset === tokenId);
-        let estimatedPnL = 0;
-        if (position) {
-          const entryPrice = Number(position.avgPrice) || 0;
-          // Use current market price if available, otherwise assume break-even or roughly current avg
-          // Ideally we'd have the live mid-price. 'curPrice' might be in position if enriched.
-          const exitPrice = Number((position as any).curPrice) || Number(position.msg_price) || 0;
-
-          if (exitPrice > 0) {
-            estimatedPnL = (exitPrice - entryPrice) * size;
-          }
-        }
-
-        const res = await sdk.tradingService.createMarketOrder({
-          tokenId,
-          side: 'SELL',
-          amount: size,
-        });
-
-        if (res.success) {
-          log('TRADE', `✅ Position closed: ${size} shares sold`);
-          recordTrade(estimatedPnL, 'manual');
-          log('INFO', `Realized PnL (Est): $${estimatedPnL.toFixed(2)}`);
+      if (command === 'closePosition') {
+        const { tokenId, size } = payload;
+        const pos = state.positions.find(p => p.asset === tokenId);
+        const meta = { conditionId: pos?.conditionId || 'unknown', outcome: pos?.outcome || '?', title: pos?.title || tokenId };
+        log('TRADE', `${modeTag()} Closing position: ${meta.title.slice(0, 40)} (${size} shares)`);
+        const fill = await placeOrder({ tokenId, side: 'SELL', amount: Number(size), orderType: 'FAK' }, 'manual', meta);
+        if (fill.success) {
+          const entry = Number(pos?.avgPrice) || 0;
+          const pnl = fill.realizedPnl ?? (entry > 0 ? (fill.avgPrice - entry) * fill.shares : 0);
+          log('TRADE', `${modeTag()} ✅ Position closed: ${fill.shares.toFixed(2)} sh @ ${fill.avgPrice.toFixed(3)} | realised $${pnl.toFixed(2)}`);
+          recordTrade(pnl, 'manual');
+          await syncPortfolio();
         } else {
-          log('WARN', `❌ Close failed: ${res.errorMsg}`);
+          log('WARN', `❌ Close failed: ${fill.error}`);
         }
-      } catch (err: any) {
-        log('WARN', `❌ Close error: ${err.message}`);
+        return;
       }
-    }
 
-    if (command === 'toggleStrategy') {
-      const { strategy, enabled } = payload;
-      const strategyName = strategy as keyof typeof CONFIG;
-
-      // Only real strategies can be toggled from the UI (not onchain, capital, risk...)
-      if (TOGGLEABLE_STRATEGIES.has(strategyName) && typeof (CONFIG[strategyName] as any).enabled !== 'undefined') {
-        (CONFIG[strategyName] as any).enabled = !!enabled;
+      if (command === 'toggleStrategy') {
+        const { strategy, enabled } = payload;
+        const key = strategy as keyof typeof CONFIG;
+        if (!TOGGLEABLE_STRATEGIES.has(key)) { log('WARN', `Unknown strategy: ${strategy}`); return; }
+        (CONFIG[key] as any).enabled = !!enabled;
         log('INFO', `⚙️ Strategy ${strategy} ${enabled ? 'ENABLED' : 'DISABLED'}`);
 
-        // Actively Start/Stop Services based on toggle
-        try {
-          if (strategy === 'dipArb') {
-            if (enabled) {
-              if (sdk.dipArb.isActive()) {
-                log('WARN', `DipArb is already running.`);
-              } else {
-                log('INFO', `Starting DipArb Service (Scanning for markets)...`);
-                await sdk.dipArb.findAndStart();
-              }
-            } else {
-              log('INFO', `Stopping DipArb Service...`);
-              await sdk.dipArb.stop();
-            }
-          } else if (strategy === 'arbitrage') {
-            if (enabled) {
-              if (arbService) {
-                // Update config
-                arbService.updateConfig({
-                  profitThreshold: CONFIG.arbitrage.profitThreshold,
-                  autoExecute: CONFIG.arbitrage.autoExecute,
-                });
-
-                if (arbService.isActive()) {
-                  log('WARN', `Arbitrage Service is already running.`);
-                } else {
-                  log('INFO', `Starting Arbitrage Service...`);
-
-                  // Try to scan and start a market if possible
-                  try {
-                    const results = await arbService.scanMarkets({ minVolume24h: 1000 }, CONFIG.arbitrage.profitThreshold);
-                    const best = results.find(r => r.arbType !== 'none') || results[0]; // Pick best or just first to monitor
-
-                    if (best) {
-                      await arbService.start(best.market);
-                      state.activeArbMarket = best.market.name;
-                      state.arbitrage.status = 'monitoring';
-                      log('ARB', `Auto-started monitoring: ${best.market.name}`);
-                      updateDashboard();
-                    } else {
-                      state.arbitrage.status = 'idle';
-                      log('WARN', 'Arbitrage Service started but no markets found. Will keep scanning in background if configured.');
-                      updateDashboard();
-                    }
-                  } catch (e) {
-                    state.arbitrage.status = 'idle';
-                    log('WARN', `Arbitrage auto-start failed: ${(e as Error).message}`);
-                    updateDashboard();
-                  }
-                }
-              } else {
-                log('ERROR', 'Arbitrage Service not initialized. Restart bot.');
-              }
-            } else {
-              log('INFO', `Stopping Arbitrage Service...`);
-              if (arbService) {
-                await arbService.stop();
-                state.arbitrage.status = 'idle';
-                updateDashboard();
-              }
-            }
-          } else if (strategy === 'smartMoney') {
-            if (enabled) {
-              log('INFO', `Initializing Smart Money...`);
-              // Call the lazy initializer we created
-              initializeSmartMoney(sdk);
-            } else {
-              log('INFO', `Smart Money monitoring disabled.`);
-            }
-          } else if (strategy === 'directTrading') {
-            if (enabled) {
-              log('INFO', `Triggering Direct Trading analysis...`);
-              // We can't easily reach the inner function checkTrendTrades from here because it's scoped inside setupDirectTrading.
-              // However, checkTrendTrades runs on an interval and checks the config flag. 
-              // By enabling the flag, the NEXT interval will pick it up.
-              // To be immediate, we'd need to expose it, but simplified "Wait for next cycle" is acceptable or we can just log.
-              log('INFO', `Direct Trading will run on next cycle (within 5 min).`);
-            }
+        if (strategy === 'dipArb') {
+          if (enabled) { if (dipArb.isActive()) log('WARN', 'DipArb already running'); else await startDipArb(); }
+          else { await dipArb.stop(); state.dipArb.status = 'idle'; }
+        } else if (strategy === 'arbitrage') {
+          if (enabled) {
+            if (!arbService) log('ERROR', 'Arbitrage service not initialised. Restart the bot.');
+            else if (arbService.isActive()) log('WARN', 'Arbitrage already running');
+            else await startArbitrageScan(1000);
+          } else if (arbService) {
+            await arbService.stop();
+            state.arbitrage.status = 'idle';
           }
-        } catch (err: any) {
-          log('WARN', `Failed to toggle service: ${err.message}`);
+        } else if (strategy === 'smartMoney') {
+          if (enabled) await initializeSmartMoney(); else stopSmartMoney();
+        } else if (strategy === 'directTrading' && enabled) {
+          log('INFO', 'Direct trading will run on the next 5-minute cycle');
         }
-
-        // Broadcast updated config to dashboard
-        const dashboardConfig: BotConfig = {
-          // ... (rest of config mapping)
-          capital: CONFIG.capital,
-          risk: CONFIG.risk,
-          smartMoney: {
-            enabled: CONFIG.smartMoney.enabled,
-            topN: CONFIG.smartMoney.topN,
-            minWinRate: CONFIG.smartMoney.minWinRate,
-            minPnl: CONFIG.smartMoney.minPnl,
-            minTrades: CONFIG.smartMoney.minTrades,
-            customWallets: CONFIG.smartMoney.customWallets,
-          },
-          arbitrage: {
-            enabled: CONFIG.arbitrage.enabled,
-            profitThreshold: CONFIG.arbitrage.profitThreshold,
-            autoExecute: CONFIG.arbitrage.autoExecute,
-          },
-          dipArb: {
-            enabled: CONFIG.dipArb.enabled,
-            coins: CONFIG.dipArb.coins,
-          },
-          directTrading: {
-            enabled: CONFIG.directTrading.enabled,
-          },
-          binance: {
-            enabled: CONFIG.binance.enabled,
-          },
-          dryRun: CONFIG.dryRun,
-        };
-        dashboardEmitter.updateConfig(dashboardConfig);
-      } else {
-        log('WARN', `Unknown strategy: ${strategy}`);
-      }
-    }
-
-    if (command === 'redeemPosition') {
-      const { conditionId } = payload;
-      log('CHAIN', `Redeem requested for: ${conditionId}`);
-
-      if (CONFIG.dryRun) {
-        log('CHAIN', `[SIMULATION] Would redeem position ${conditionId}`);
+        updateDashboard();
+        dashboardEmitter.updateConfig(dashboardConfig());
         return;
       }
 
-      try {
-        // Create CTFClient instance for on-chain redemption
-        const ctfClient = new CTFClient({
-          privateKey: process.env.POLYMARKET_PRIVATE_KEY!,
-        });
-
-        // 1. Fetch market details to get Token IDs (required for Polymarket CLOB redemption)
-        // We use the Gamma API (via sdk.markets or sdk.gammaApi)
-        log('CHAIN', `Fetching market details for condition ${conditionId}...`);
-        const market = await sdk.markets.getMarket(conditionId);
-
-        if (!market || !market.tokens || market.tokens.length < 2) {
-          log('WARN', `❌ Redeem failed: Valid market not found for condition ${conditionId}`);
-          return;
-        }
-
-        const tokenIds = {
-          yesTokenId: market.tokens[0].tokenId,
-          noTokenId: market.tokens[1].tokenId,
-        };
-
-        log('CHAIN', `Found market: ${market.question} (Tokens: ${tokenIds.yesTokenId.slice(0, 10)}... / ${tokenIds.noTokenId.slice(0, 10)}...)`);
-
-        // 2. Redeem using Polymarket Token IDs
-        const result = await ctfClient.redeemByTokenIds(conditionId, tokenIds);
-
-        if (result.success) {
-          log('CHAIN', `✅ Redeemed! ${result.tokensRedeemed} tokens → ${result.usdcReceived} USDC`);
-          log('CHAIN', `   Tx: ${result.txHash}`);
-        } else {
-          log('WARN', `❌ Redeem failed`);
-        }
-      } catch (err: any) {
-        log('WARN', `❌ Redeem error: ${err.message}`);
+      if (command === 'redeemPosition') {
+        const { conditionId } = payload;
+        const entry = openTrades().find(t => t.conditionId === conditionId)
+          ?? { tokenId: '', conditionId, strategy: 'manual' as Strategy, outcome: '?', title: conditionId, usd: 0, shares: 0, entryPrice: 0, openedAt: 0, peakPrice: 0 };
+        log('CHAIN', `${modeTag()} Redeem requested for ${conditionId.slice(0, 12)}...`);
+        const pnl = await redeemTrade(entry);
+        if (pnl === null) log('WARN', '❌ Redeem failed');
+        else { state.redeems++; log('CHAIN', `✅ Redeemed | realised $${pnl.toFixed(2)}`); recordTrade(pnl, entry.strategy === 'manual' ? 'direct' : entry.strategy); await syncPortfolio(); }
+        return;
       }
+
+      if (command === 'resetPaper') {
+        if (!paper) { log('WARN', 'Not in simulation mode'); return; }
+        paper.reset(); paper.save();
+        risk = createRiskState(CONFIG.capital.totalUsd); persistRisk(); syncRiskToState();
+        sessionTrades.length = 0;
+        log('INFO', '📝 Paper account and simulation risk state reset');
+        await syncPortfolio();
+      }
+    } catch (err) {
+      log('WARN', `Command ${command} failed: ${(err as Error).message}`);
     }
   });
+}
 
-  process.on('SIGINT', async () => {
+// ============================================================================
+// MAIN
+// ============================================================================
+
+async function main() {
+  console.clear();
+  console.log('╔════════════════════════════════════════════════════════════════════╗');
+  console.log(`║   POLYMARKET BOT v3.2 + DASHBOARD   ${CONFIG.dryRun ? '🧪 SIMULATION (paper broker)' : '🔴 LIVE TRADING          '}   ║`);
+  console.log('╚════════════════════════════════════════════════════════════════════╝\n');
+
+  const dashboardPort = parseInt(process.env.DASHBOARD_PORT || '3001', 10);
+  startDashboard(dashboardPort).on('error', (err: NodeJS.ErrnoException) => {
+    if (err.code === 'EADDRINUSE') {
+      console.error(`Dashboard port ${dashboardPort} is already in use (another bot instance?). Stop it or set DASHBOARD_PORT.`);
+      process.exit(1);
+    }
+    throw err;
+  });
+  console.log(`\n🌐 Dashboard: http://localhost:${dashboardPort}\n`);
+
+  if (!process.env.POLYMARKET_PRIVATE_KEY && !CONFIG.dryRun) {
+    log('ERROR', 'POLYMARKET_PRIVATE_KEY not found in .env (required for LIVE mode)');
+    process.exit(1);
+  }
+  if (!process.env.POLYMARKET_PRIVATE_KEY && ALLOW_LIVE_TOGGLE === 'true') {
+    log('WARN', 'No private key: the dashboard LIVE toggle stays disabled');
+  }
+
+  if (CONFIG.dryRun) {
+    // Simulation needs market data and the WebSocket only: no CLOB API key, and
+    // no private key at all (the SDK falls back to a throwaway key for reads).
+    sdk = new PolymarketSDK({ privateKey: process.env.POLYMARKET_PRIVATE_KEY });
+    sdk.connect();
+    try { await sdk.waitForConnection(15000); } catch (err) { log('WARN', `Realtime WebSocket not connected yet: ${(err as Error).message}`); }
+    if (process.env.POLYMARKET_PRIVATE_KEY) log('INFO', `Wallet: ${sdk.tradingService.getAddress()} (not used in simulation)`);
+  } else {
+    sdk = await PolymarketSDK.create({ privateKey: process.env.POLYMARKET_PRIVATE_KEY! });
+    log('INFO', `Wallet: ${sdk.tradingService.getAddress()}`);
+  }
+  readOnlyCtf = new CTFClient({ privateKey: '0x' + '1'.repeat(64) });
+
+  if (CONFIG.dryRun) {
+    setupPaperBroker();
+  } else {
+    liveCtf = new CTFClient({ privateKey: process.env.POLYMARKET_PRIVATE_KEY! });
+    loadLiveTrades();
+  }
+  loadRiskForCurrentMode();
+
+  dashboardEmitter.updateConfig(dashboardConfig());
+  updateDashboard();
+  setupDashboardCommands();
+
+  await setupOnchain();           // live only: approvals first
+  await setupSwap();              // live only: balances
+  await setupBinanceAnalysis();
+  await setupArbitrage();
+  await setupDipArb();
+  if (CONFIG.smartMoney.enabled) await initializeSmartMoney();
+  await setupDirectTrading();
+
+  await syncPortfolio();
+  setInterval(syncPortfolio, 30 * 1000);
+  setInterval(() => { void manageExits(); }, 60 * 1000);
+  setInterval(updateDashboard, 5000);
+
+  const shutdown = async () => {
     console.log('\n\nShutting down...');
     persistRisk();
+    paper?.save();
+    saveLiveTrades();
+    try {
+      addSession(createSessionFromState(state.startTime, state, CONFIG, sessionTrades));
+    } catch (err) {
+      console.error('Could not save session history:', (err as Error).message);
+    }
+    stopSmartMoney();
     if (arbService) await arbService.stop();
-    await sdk.dipArb.stop();
+    await dipArb.stop();
     sdk.stop();
     process.exit(0);
-  });
+  };
+  process.on('SIGINT', shutdown);
+  process.on('SIGTERM', shutdown);
 
-  log('INFO', '🚀 Bot + Dashboard running! Press Ctrl+C to stop.\n');
+  log('INFO', `🚀 Bot + Dashboard running in ${CONFIG.dryRun ? 'SIMULATION' : 'LIVE'} mode. Press Ctrl+C to stop.\n`);
 
-  // Status Display Loop
   function displayStatus() {
     const runtime = Math.round((Date.now() - state.startTime) / 1000 / 60);
-
+    const pct = positionPct();
     console.log('\n' + '═'.repeat(70));
-    console.log('              POLYMARKET BOT v3.0 STATUS');
+    console.log('              POLYMARKET BOT v3.2 STATUS');
     console.log('═'.repeat(70));
     console.log(`  Runtime:        ${runtime} minutes`);
-    console.log(`  Mode:           ${CONFIG.dryRun ? '🧪 DRY RUN' : '🔴 LIVE'}`);
-    console.log(`  Status:         ${state.isPaused ? '⏸️ PAUSED' : '▶️ ACTIVE'}`);
+    console.log(`  Mode:           ${CONFIG.dryRun ? '🧪 SIMULATION' : '🔴 LIVE'}`);
+    console.log(`  Status:         ${state.permanentlyHalted ? '💀 HALTED' : state.isPaused ? `⏸️ PAUSED (${risk.pauseReason})` : '▶️ ACTIVE'}`);
     console.log('─'.repeat(70));
-    console.log('  BALANCES:');
-    console.log(`    MATIC:        ${state.maticBalance.toFixed(4)}`);
-    console.log(`    USDC:         $${state.usdcBalance.toFixed(2)}`);
-    console.log(`    USDC.e:       $${state.usdcEBalance.toFixed(2)}`);
+    console.log('  RISK:');
+    console.log(`    Daily PnL:    $${state.dailyPnL.toFixed(2)} / -$${(CONFIG.capital.totalUsd * CONFIG.risk.dailyMaxLossPct).toFixed(2)}`);
+    console.log(`    Monthly PnL:  $${state.monthlyPnL.toFixed(2)} / -$${(CONFIG.capital.totalUsd * CONFIG.risk.monthlyMaxLossPct).toFixed(2)}`);
+    console.log(`    Total PnL:    $${state.totalPnL.toFixed(2)} (unrealised $${state.unrealizedPnL.toFixed(2)})`);
+    console.log(`    Drawdown:     ${(state.currentDrawdown * 100).toFixed(1)}% / ${(CONFIG.risk.maxDrawdownFromPeak * 100).toFixed(0)}%`);
+    console.log(`    Streak:       ${state.consecutiveWins}W / ${state.consecutiveLosses}L → next size ${(pct * 100).toFixed(2)}% ($${(CONFIG.capital.totalUsd * pct).toFixed(2)})`);
+    console.log('─'.repeat(70));
+    if (paper) {
+      const s = paper.summary();
+      console.log('  PAPER ACCOUNT:');
+      console.log(`    Balance:      $${s.balance.toFixed(2)} | positions $${s.positionsValue.toFixed(2)} | equity $${s.equity.toFixed(2)}`);
+      console.log(`    Realised:     $${s.realizedPnl.toFixed(2)} | gas $${s.gasSpent.toFixed(2)} | fees $${s.feesPaid.toFixed(2)} | ${s.fills} fills`);
+    } else {
+      console.log('  BALANCES:');
+      console.log(`    MATIC:        ${state.maticBalance.toFixed(4)}`);
+      console.log(`    USDC.e:       $${state.usdcEBalance.toFixed(2)}`);
+    }
     console.log('─'.repeat(70));
     console.log('  STRATEGIES:');
     console.log(`    Smart Money:  ${state.smartMoneyTrades} trades | ${state.followedWallets.length} wallets`);
-    console.log(`    Arbitrage:    ${state.arbTrades} trades`);
-    console.log(`    DipArb:       ${state.dipArbTrades} trades`);
+    console.log(`    Arbitrage:    ${state.arbTrades} trades | $${state.arbProfit.toFixed(2)}`);
+    console.log(`    DipArb:       ${state.dipArbTrades} trades | ${state.activeDipArbMarket || '-'}`);
+    console.log(`    Direct:       ${state.directTrades} trades | open ${openTrades().filter(t => t.strategy === 'direct').length}`);
     console.log('═'.repeat(70) + '\n');
   }
 
   setInterval(displayStatus, 60000);
-  displayStatus(); // Initial call
+  displayStatus();
 }
 
 main().catch((err) => {

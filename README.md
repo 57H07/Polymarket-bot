@@ -304,11 +304,29 @@ The dashboard can switch the bot to LIVE, sell positions and redeem. Therefore:
 - Optional shared secret: set `DASHBOARD_TOKEN=...` and open `http://localhost:3001/?token=...`.
 - The "Switch to LIVE" button is disabled unless `ALLOW_DASHBOARD_LIVE_TOGGLE=true`. The safe way to go live is to restart with `DRY_RUN=false`.
 
+### 🧪 Simulation Mode (paper trading against real orderbooks)
+`DRY_RUN=true` (the default) runs **exactly the same strategy code as live**, but every order is filled by a paper broker instead of the exchange:
+- Market orders walk the **real CLOB orderbook** level by level, respect the limit price / slippage, and fail on insufficient depth (FOK) like the exchange would.
+- Split / merge / redeem move shares and USDC in the paper account and charge the configured gas (`estimatedGasCostUSD`, $0.10 per operation by default).
+- The paper account starts at `CAPITAL_USD`, is marked to market every 30 s, and is persisted in `data/paper-state.json` so a simulation can run for days across restarts. `PAPER_RESET=true` (or the "Reset sim" button) starts over.
+- Realised PnL from every paper fill feeds the same risk manager, dynamic sizing, exposure limits and exit manager as in live mode.
+- No private key is needed in simulation. `PAPER_FEE_RATE` lets you model a taker fee (0 by default, like most Polymarket markets).
+
+What the simulation cannot reproduce: your own orders moving the book, queue position, on-chain latency, and RPC failures. Treat its results as an upper bound.
+
+### ⚙️ What actually runs (v3.2)
+- **Risk manager**: daily / monthly / drawdown / total-loss limits and consecutive-loss pause, fed with realised PnL, persisted per mode.
+- **Dynamic sizing**: base 2% of capital, -20% per consecutive loss beyond the 2nd, +10% per consecutive win beyond the 3rd, clamped to 1%-5%.
+- **Exposure limits**: per market (10%), total (30%), per strategy allocation (Smart Money 60%, Arbitrage 20%, DipArb 10%, Direct 10%).
+- **Smart Money filters** from the trader's closed positions: win rate ≥ 60%, profit factor ≥ 1.5, consistency ≥ 70% over the last 10 trades, no single trade above 30% of total PnL, ≥ 30 closed trades. Leader sells are copied too.
+- **Arbitrage**: the bot (not the service) decides execution: risk gate, sizing, and net profit after gas ≥ $0.50.
+- **Exit manager** (every 60 s): stop-loss 15%, take-profit 25%, trailing stop 10%, max hold 7 days on direct trades; automatic redeem of resolved markets for every position the bot opened.
+
 ### ⚠️ Known Limitations (read before going live)
-- **Dry run is not a backtest.** Arbitrage "profits" in dry run are estimates from the orderbook (counted once per minute per market), Smart Money and DipArb signals are logged with 0 profit. Use dry run to check that the bot sees signals, not to judge profitability.
-- **Opening trades record 0 PnL.** Copy trades and DipArb legs are recorded when opened; PnL is realised on DipArb merge/exit and on manual "Close position". Positions closed on polymarket.com are not tracked by the bot.
-- **Direct trading** is a naive Binance-trend prototype (5 vs 5 candles, 15m) with no stop-loss. Keep it disabled.
-- Two bot entry points exist (`bot-with-dashboard.ts` and `bot-config.ts`) with different logic. This guide only covers `bot-with-dashboard.ts`.
+- **Direct trading** is a naive Binance-trend prototype (5 vs 5 candles, 15m). It now has exits, but no documented edge. Keep it disabled unless you are testing it.
+- In live mode the CLOB does not return fill details synchronously, so entry prices for the exit manager are estimated from the order's limit price.
+- Positions closed by hand on polymarket.com are not seen by the bot's ledger (they are by the Positions page, which reads the Data API).
+- `bot-config.ts` is a legacy entry point with older logic. This guide only covers `bot-with-dashboard.ts`.
 
 ### ⚠️ Your Responsibilities
 1. **Private Keys**: Your key gives full access to your funds. Keep it safe.
@@ -322,9 +340,9 @@ The dashboard can switch the bot to LIVE, sell positions and redeem. Therefore:
 
 ### 📊 Recommended Testing Path
 
-1. **Day 1-2**: Dry run mode (`DRY_RUN=true`, `CAPITAL_USD=50`)
-2. **Day 3-9**: Live testing (`DRY_RUN=false`, `CAPITAL_USD=50`)
-3. **Day 10+**: Scale up if profitable (`CAPITAL_USD=250`)
+1. **Week 1-2**: Simulation (`DRY_RUN=true`, `CAPITAL_USD=50`), one strategy at a time. Judge it on realised paper PnL after gas, fill failures, and for DipArb the ratio of hedged rounds to opened legs.
+2. **Week 3+**: Live with a dedicated wallet (`DRY_RUN=false`, `CAPITAL_USD=20-50`), same single strategy. Reconcile the bot's PnL with your on-chain balance every day.
+3. **Later**: Scale up only if live results match the simulation (`CAPITAL_USD=250`)
 
 ### 🚨 Emergency Actions
 

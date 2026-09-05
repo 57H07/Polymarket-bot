@@ -9,9 +9,10 @@ interface HeaderProps {
   onHistoryClick?: () => void;
   onPositionsClick?: () => void;
   onToggleDryRun?: () => void;
+  onResetPaper?: () => void;
 }
 
-export function Header({ state, config, connected, onHistoryClick, onPositionsClick, onToggleDryRun }: HeaderProps) {
+export function Header({ state, config, connected, onHistoryClick, onPositionsClick, onToggleDryRun, onResetPaper }: HeaderProps) {
   const [runtime, setRuntime] = useState('0m');
   const [copied, setCopied] = useState(false);
 
@@ -129,8 +130,19 @@ export function Header({ state, config, connected, onHistoryClick, onPositionsCl
               }`}
           >
             <span>{isDryRun ? '💰' : '🧪'}</span>
-            Switch to {isDryRun ? 'LIVE' : 'DRY RUN'}
+            Switch to {isDryRun ? 'LIVE' : 'SIMULATION'}
           </button>
+
+          {isDryRun && (
+            <button
+              onClick={onResetPaper}
+              className="btn btn-secondary text-sm"
+              title="Reset the paper account and simulation risk counters"
+            >
+              <span>🔄</span>
+              Reset sim
+            </button>
+          )}
 
           <div className="w-px h-8 bg-white/10" />
 

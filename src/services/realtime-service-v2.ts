@@ -259,6 +259,14 @@ export class RealtimeServiceV2 extends EventEmitter {
   private subscriptionIdCounter = 0;
   private connected = false;
 
+  // Reconnection with exponential backoff (the upstream client reconnects
+  // instantly and twice per failure, which floods the server and the logs
+  // when the endpoint is down or returns 403).
+  private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private reconnectDelayMs = 1000;
+  private static readonly MAX_RECONNECT_DELAY_MS = 60_000;
+  private manualDisconnect = false;
+
   // Store subscription messages for reconnection
   private subscriptionMessages: Map<string, { subscriptions: Array<{ topic: string; type: string; filters?: string; clob_auth?: ClobApiKeyCreds }> }> = new Map();
 
@@ -289,22 +297,48 @@ export class RealtimeServiceV2 extends EventEmitter {
       return this;
     }
 
+    this.manualDisconnect = false;
     this.client = new RealTimeDataClient({
       onConnect: this.handleConnect.bind(this),
       onMessage: this.handleMessage.bind(this),
       onStatusChange: this.handleStatusChange.bind(this),
-      autoReconnect: this.config.autoReconnect,
+      autoReconnect: false,
       pingInterval: this.config.pingInterval,
     });
+    // The client constructor forces autoReconnect to true (`args.autoReconnect || true`);
+    // we manage reconnection ourselves with backoff.
+    (this.client as unknown as { autoReconnect: boolean }).autoReconnect = false;
 
     this.client.connect();
     return this;
+  }
+
+  private scheduleReconnect(): void {
+    if (!this.config.autoReconnect || this.manualDisconnect || !this.client || this.reconnectTimer) return;
+    const delay = this.reconnectDelayMs;
+    this.reconnectDelayMs = Math.min(this.reconnectDelayMs * 2, RealtimeServiceV2.MAX_RECONNECT_DELAY_MS);
+    this.log(`Reconnecting in ${Math.round(delay / 1000)}s...`);
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null;
+      if (this.manualDisconnect || !this.client) return;
+      try {
+        this.client.connect();
+      } catch (err) {
+        this.log(`Reconnect failed: ${err instanceof Error ? err.message : String(err)}`);
+        this.scheduleReconnect();
+      }
+    }, delay);
   }
 
   /**
    * Disconnect from WebSocket server
    */
   disconnect(): void {
+    this.manualDisconnect = true;
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
     if (this.client) {
       this.client.disconnect();
       this.client = null;
@@ -899,6 +933,7 @@ export class RealtimeServiceV2 extends EventEmitter {
 
   private handleConnect(client: RealTimeDataClient): void {
     this.connected = true;
+    this.reconnectDelayMs = 1000;
     this.log('Connected to WebSocket server');
 
     // Re-subscribe to all active subscriptions on reconnect
@@ -919,6 +954,7 @@ export class RealtimeServiceV2 extends EventEmitter {
     if (status === ConnectionStatus.DISCONNECTED) {
       this.connected = false;
       this.emit('disconnected');
+      this.scheduleReconnect();
     } else if (status === ConnectionStatus.CONNECTED) {
       this.connected = true;
     }

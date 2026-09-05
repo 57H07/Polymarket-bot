@@ -78,6 +78,15 @@ export interface BotState {
   // Smart Money signals
   smartMoneySignals?: SmartMoneySignal[];
 
+  // Paper Trading (Simulation)
+  paper?: {
+    balance: number;
+    initialBalance: number;
+    pnl: number;
+    trades: number;
+    totalVolume: number;
+  };
+
   // Portfolio Sync (positions)
   positions?: any[];
 }
@@ -89,12 +98,7 @@ export interface BotConfig {
     maxPerMarketPct: number;
     maxTotalExposurePct: number;
     minOrderUsd: number;
-    strategyAllocation: {
-      smartMoney: number;
-      arbitrage: number;
-      dipArb: number;
-      directTrades: number;
-    };
+    strategyAllocation: Record<string, number>;
   };
   risk: {
     dailyMaxLossPct: number;

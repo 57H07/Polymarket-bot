@@ -89,6 +89,7 @@ function App() {
         onHistoryClick={() => setCurrentPage('history')}
         onPositionsClick={() => setCurrentPage('positions')}
         onToggleDryRun={handleToggleDryRun}
+        onResetPaper={() => { if (window.confirm('Reset the paper account, positions and simulation risk counters?')) sendCommand('resetPaper', {}); }}
       />
 
       <main className="p-4 space-y-4 max-w-[1800px] mx-auto">
