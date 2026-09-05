@@ -47,6 +47,50 @@ export function BalanceCards({ state }: BalanceCardsProps) {
     });
   };
 
+  if (state?.paper) {
+    const p = state.paper;
+    const unrealized = state.unrealizedPnL ?? 0;
+    const realized = p.pnl - unrealized;
+    const equity = p.balance + (state.positions ?? []).reduce((s, pos: any) => s + (Number(pos.curPrice) || 0) * (Number(pos.size) || 0), 0);
+    const sign = (v: number) => `${v >= 0 ? '+' : '-'}$${formatCurrency(Math.abs(v))}`;
+    return (
+      <div className="grid grid-cols-2 xl:grid-cols-4 gap-2">
+        <BalanceCard
+          icon="🧪"
+          label="Paper cash"
+          value={`$${formatCurrency(p.balance)}`}
+          subLabel={`start $${formatCurrency(p.initialBalance)}`}
+          gradient="bg-gradient-to-br from-blue-500/10 to-blue-500/5"
+          iconBg="bg-blue-500/20"
+        />
+        <BalanceCard
+          icon="🏦"
+          label="Equity"
+          value={`$${formatCurrency(equity)}`}
+          subLabel="cash + positions"
+          gradient="bg-gradient-to-br from-yellow-500/10 to-orange-500/5"
+          iconBg="bg-yellow-500/20"
+        />
+        <BalanceCard
+          icon="✅"
+          label="Realised"
+          value={sign(realized)}
+          subLabel={`${p.trades} fills`}
+          gradient={realized >= 0 ? 'bg-gradient-to-br from-green-500/10 to-green-500/5' : 'bg-gradient-to-br from-red-500/10 to-red-500/5'}
+          iconBg={realized >= 0 ? 'bg-green-500/20' : 'bg-red-500/20'}
+        />
+        <BalanceCard
+          icon="📈"
+          label="Unrealised"
+          value={sign(unrealized)}
+          subLabel="open positions"
+          gradient={unrealized >= 0 ? 'bg-gradient-to-br from-green-500/10 to-green-500/5' : 'bg-gradient-to-br from-red-500/10 to-red-500/5'}
+          iconBg={unrealized >= 0 ? 'bg-green-500/20' : 'bg-red-500/20'}
+        />
+      </div>
+    );
+  }
+
   return (
     <div className="grid grid-cols-2 xl:grid-cols-4 gap-2">
       <BalanceCard

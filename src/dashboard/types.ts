@@ -120,12 +120,7 @@ export interface BotConfig {
     maxPerMarketPct: number;
     maxTotalExposurePct: number;
     minOrderUsd: number;
-    strategyAllocation: {
-      smartMoney: number;
-      arbitrage: number;
-      dipArb: number;
-      directTrades: number;
-    };
+    strategyAllocation: Record<string, number>;
   };
   risk: {
     dailyMaxLossPct: number;

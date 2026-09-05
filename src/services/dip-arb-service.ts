@@ -36,9 +36,20 @@ import {
   type Subscription,
   type CryptoPrice,
 } from './realtime-service-v2.js';
-import { TradingService, type MarketOrderParams } from './trading-service.js';
+import type { TradingService, MarketOrderParams } from './trading-service.js';
 import { MarketService } from './market-service.js';
 import { CTFClient } from '../clients/ctf-client.js';
+
+/**
+ * Minimal execution surface DipArbService needs. TradingService satisfies it in
+ * live mode; a PaperBroker satisfies it in simulation mode.
+ */
+export type DipArbTradingClient = Pick<TradingService, 'createMarketOrder' | 'initialize'>;
+/** Minimal on-chain surface DipArbService needs (CTFClient or PaperBroker). */
+export type DipArbCtfClient = Pick<
+  CTFClient,
+  'getAddress' | 'getMarketResolution' | 'getPositionBalanceByTokenIds' | 'mergeByTokenIds' | 'redeemByTokenIds'
+>;
 import type { Side } from '../core/types.js';
 import {
   type DipArbServiceConfig,
@@ -78,9 +89,9 @@ import {
 export class DipArbService extends EventEmitter {
   // Dependencies
   private realtimeService: RealtimeServiceV2;
-  private tradingService: TradingService | null = null;
+  private tradingService: DipArbTradingClient | null = null;
   private marketService: MarketService;
-  private ctf: CTFClient | null = null;
+  private ctf: DipArbCtfClient | null = null;
 
   // Configuration
   private config: DipArbConfigInternal;
@@ -132,10 +143,12 @@ export class DipArbService extends EventEmitter {
 
   constructor(
     realtimeService: RealtimeServiceV2,
-    tradingService: TradingService | null,
+    tradingService: DipArbTradingClient | null,
     marketService: MarketService,
     privateKey?: string,
-    chainId: number = 137
+    chainId: number = 137,
+    /** Override the on-chain client (used by simulation mode). Takes precedence over privateKey. */
+    ctfClient?: DipArbCtfClient
   ) {
     super();
 
@@ -150,8 +163,10 @@ export class DipArbService extends EventEmitter {
     this.autoRotateConfig = { ...DEFAULT_AUTO_ROTATE_CONFIG };
     this.stats = createDipArbInitialStats();
 
-    // Initialize CTF if private key provided
-    if (privateKey) {
+    // Initialize CTF: injected client first (simulation), else from private key
+    if (ctfClient) {
+      this.ctf = ctfClient;
+    } else if (privateKey) {
       this.ctf = new CTFClient({
         privateKey,
         rpcUrl: 'https://polygon-rpc.com',

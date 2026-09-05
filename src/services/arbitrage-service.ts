@@ -28,6 +28,14 @@ import {
 import { TradingService } from './trading-service.js';
 import { MarketService } from './market-service.js';
 import { CTFClient, type TokenIds } from '../clients/ctf-client.js';
+
+/** Minimal execution surface (TradingService in live mode, PaperBroker in simulation). */
+export type ArbTradingClient = Pick<TradingService, 'createMarketOrder' | 'initialize'>;
+/** Minimal on-chain surface (CTFClient in live mode, PaperBroker in simulation). */
+export type ArbCtfClient = Pick<
+  CTFClient,
+  'getAddress' | 'getUsdcBalance' | 'getMarketResolution' | 'getPositionBalanceByTokenIds' | 'mergeByTokenIds' | 'split' | 'redeem'
+>;
 import { GammaApiClient } from '../clients/gamma-api.js';
 import { RateLimiter } from '../core/rate-limiter.js';
 import { createUnifiedCache } from '../core/unified-cache.js';
@@ -52,6 +60,10 @@ export interface ArbitrageMarketConfig {
 export interface ArbitrageServiceConfig {
   /** Private key for trading (optional for monitor-only mode) */
   privateKey?: string;
+  /** Inject an execution client instead of building one from privateKey (simulation mode) */
+  tradingClient?: ArbTradingClient;
+  /** Inject an on-chain client instead of building one from privateKey (simulation mode) */
+  ctfClient?: ArbCtfClient;
   /** RPC URL for CTF operations */
   rpcUrl?: string;
   /** Minimum profit threshold (default: 0.005 = 0.5%) */
@@ -248,12 +260,12 @@ export interface ArbitrageServiceEvents {
 export class ArbitrageService extends EventEmitter {
   private realtimeService: RealtimeServiceV2;
   private marketSubscription: MarketSubscription | null = null;
-  private ctf: CTFClient | null = null;
-  private tradingService: TradingService | null = null;
+  private ctf: ArbCtfClient | null = null;
+  private tradingService: ArbTradingClient | null = null;
   private rateLimiter: RateLimiter;
 
   private market: ArbitrageMarketConfig | null = null;
-  private config: Omit<Required<ArbitrageServiceConfig>, 'privateKey' | 'rpcUrl' | 'rebalanceInterval'> & {
+  private config: Omit<Required<ArbitrageServiceConfig>, 'privateKey' | 'rpcUrl' | 'rebalanceInterval' | 'tradingClient' | 'ctfClient'> & {
     privateKey?: string;
     rpcUrl?: string;
     rebalanceIntervalMs: number;
@@ -320,8 +332,11 @@ export class ArbitrageService extends EventEmitter {
     this.rateLimiter = new RateLimiter();
     this.realtimeService = new RealtimeServiceV2({ debug: false });
 
-    // Initialize trading clients if private key provided
-    if (this.config.privateKey) {
+    // Initialize trading clients: injected (simulation) or from private key
+    if (config.tradingClient && config.ctfClient) {
+      this.tradingService = config.tradingClient;
+      this.ctf = config.ctfClient;
+    } else if (this.config.privateKey) {
       this.ctf = new CTFClient({
         privateKey: this.config.privateKey,
         rpcUrl: this.config.rpcUrl,
@@ -463,6 +478,13 @@ export class ArbitrageService extends EventEmitter {
    */
   getOrderbook(): OrderbookState {
     return { ...this.orderbook };
+  }
+
+  /**
+   * Get the market currently being monitored (null when stopped)
+   */
+  getMarket(): ArbitrageMarketConfig | null {
+    return this.market;
   }
 
   /**
