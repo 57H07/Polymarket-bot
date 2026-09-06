@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import type { SessionSummary, HistoryData } from '../types';
+import { AmbientBackground } from './AmbientBackground';
 
 interface HistoryPageProps {
   onBack: () => void;
@@ -84,10 +85,12 @@ export function HistoryPage({ onBack }: HistoryPageProps) {
   }
 
   return (
-    <div className="min-h-screen bg-poly-dark text-white">
+    <div className="relative min-h-screen overflow-hidden bg-poly-dark pb-14 text-white">
+      <AmbientBackground />
+      <div className="app-shell mx-auto max-w-[1760px]">
       {/* Header */}
-      <header className="glass-card border-b border-white/5 px-6 py-4">
-        <div className="flex items-center justify-between max-w-[1600px] mx-auto">
+      <header className="dc-rise px-[clamp(14px,2.4vw,40px)] py-6">
+        <div className="flex flex-wrap items-center justify-between gap-4">
           <div className="flex items-center gap-4">
             <button
               onClick={onBack}
@@ -96,12 +99,15 @@ export function HistoryPage({ onBack }: HistoryPageProps) {
               ← Back to Dashboard
             </button>
             <div className="flex items-center gap-3">
-              <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-purple-500 to-blue-500 flex items-center justify-center text-xl">
-                📚
+              <div
+                className="grid h-10 w-10 flex-none place-items-center rounded-[12px] border border-[#2a2440]"
+                style={{ background: 'linear-gradient(145deg, #1b1630, #0d0d16)' }}
+              >
+                <div className="h-3 w-3 rounded" style={{ background: 'linear-gradient(140deg, #9b8cff, #4aa8ff)' }} />
               </div>
               <div>
                 <h1 className="text-xl font-bold">Session History</h1>
-                <div className="text-xs text-gray-500">View past trading sessions</div>
+                <div className="mt-0.5 font-mono text-[11px] tracking-[0.08em] text-gray-500">VIEW PAST TRADING SESSIONS</div>
               </div>
             </div>
           </div>
@@ -132,10 +138,9 @@ export function HistoryPage({ onBack }: HistoryPageProps) {
         </div>
       </header>
 
-      <main className="p-6 max-w-[1600px] mx-auto">
+      <main className="px-[clamp(14px,2.4vw,40px)]">
         {error ? (
           <div className="panel p-8 text-center">
-            <div className="text-4xl mb-4">⚠️</div>
             <div className="text-red-400">{error}</div>
             <button onClick={fetchHistory} className="btn btn-primary mt-4">
               Retry
@@ -186,29 +191,29 @@ export function HistoryPage({ onBack }: HistoryPageProps) {
 
                 {/* Stats Grid */}
                 <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-4">
-                  <div className="bg-poly-dark/50 rounded-xl p-4 text-center">
+                  <div className="inset-tile p-4 text-center">
                     <div className="text-2xl font-bold font-mono text-white">{selectedSession.totalTrades}</div>
                     <div className="text-xs text-gray-500 uppercase tracking-wider mt-1">Trades</div>
                   </div>
-                  <div className="bg-poly-dark/50 rounded-xl p-4 text-center">
+                  <div className="inset-tile p-4 text-center">
                     <div className="text-2xl font-bold font-mono text-green-400">{selectedSession.wins}</div>
                     <div className="text-xs text-gray-500 uppercase tracking-wider mt-1">Wins</div>
                   </div>
-                  <div className="bg-poly-dark/50 rounded-xl p-4 text-center">
+                  <div className="inset-tile p-4 text-center">
                     <div className="text-2xl font-bold font-mono text-red-400">{selectedSession.losses}</div>
                     <div className="text-xs text-gray-500 uppercase tracking-wider mt-1">Losses</div>
                   </div>
-                  <div className="bg-poly-dark/50 rounded-xl p-4 text-center">
+                  <div className="inset-tile p-4 text-center">
                     <div className={`text-2xl font-bold font-mono ${selectedSession.winRate >= 50 ? 'text-green-400' : 'text-red-400'}`}>
                       {selectedSession.winRate.toFixed(1)}%
                     </div>
                     <div className="text-xs text-gray-500 uppercase tracking-wider mt-1">Win Rate</div>
                   </div>
-                  <div className="bg-poly-dark/50 rounded-xl p-4 text-center">
+                  <div className="inset-tile p-4 text-center">
                     <div className="text-2xl font-bold font-mono text-green-400">{formatPnL(selectedSession.largestWin)}</div>
                     <div className="text-xs text-gray-500 uppercase tracking-wider mt-1">Best Trade</div>
                   </div>
-                  <div className="bg-poly-dark/50 rounded-xl p-4 text-center">
+                  <div className="inset-tile p-4 text-center">
                     <div className="text-2xl font-bold font-mono text-red-400">{formatPnL(selectedSession.largestLoss)}</div>
                     <div className="text-xs text-gray-500 uppercase tracking-wider mt-1">Worst Trade</div>
                   </div>
@@ -221,7 +226,6 @@ export function HistoryPage({ onBack }: HistoryPageProps) {
               <div className="panel">
                 <div className="panel-header">
                   <h3 className="section-header mb-0">
-                    <div className="section-header-icon bg-gradient-to-br from-purple-500/20 to-blue-500/20">📊</div>
                     Strategy Performance
                   </h3>
                 </div>
@@ -234,7 +238,7 @@ export function HistoryPage({ onBack }: HistoryPageProps) {
                   ].map((strategy) => {
                     const stats = selectedSession.strategyStats[strategy.key as keyof typeof selectedSession.strategyStats];
                     return (
-                      <div key={strategy.key} className={`flex items-center justify-between p-3 rounded-xl bg-poly-dark/50 ${!strategy.enabled ? 'opacity-50' : ''}`}>
+                      <div key={strategy.key} className={`flex items-center justify-between p-3 inset-tile ${!strategy.enabled ? 'opacity-50' : ''}`}>
                         <div className="flex items-center gap-3">
                           <div className={`w-3 h-3 rounded-full bg-${strategy.color}-400`} />
                           <span className="text-white">{strategy.name}</span>
@@ -256,7 +260,6 @@ export function HistoryPage({ onBack }: HistoryPageProps) {
               <div className="panel">
                 <div className="panel-header">
                   <h3 className="section-header mb-0">
-                    <div className="section-header-icon bg-gradient-to-br from-pink-500/20 to-purple-500/20">👛</div>
                     Copied Wallets Performance
                   </h3>
                 </div>
@@ -268,7 +271,7 @@ export function HistoryPage({ onBack }: HistoryPageProps) {
                   ) : (
                     <div className="space-y-2 max-h-64 overflow-y-auto">
                       {selectedSession.walletPerformance.map((wallet) => (
-                        <div key={wallet.wallet} className="flex items-center justify-between p-3 rounded-xl bg-poly-dark/50">
+                        <div key={wallet.wallet} className="flex items-center justify-between p-3 inset-tile">
                           <div className="flex items-center gap-3">
                             <div className="w-8 h-8 rounded-full bg-gradient-to-br from-purple-400 to-pink-400" />
                             <div>
@@ -291,25 +294,24 @@ export function HistoryPage({ onBack }: HistoryPageProps) {
             <div className="panel">
               <div className="panel-header">
                 <h3 className="section-header mb-0">
-                  <div className="section-header-icon bg-gradient-to-br from-cyan-500/20 to-blue-500/20">⛓️</div>
                   On-Chain Operations
                 </h3>
               </div>
               <div className="panel-body">
                 <div className="grid grid-cols-4 gap-4">
-                  <div className="bg-poly-dark/50 rounded-xl p-4 text-center">
+                  <div className="inset-tile p-4 text-center">
                     <div className="text-2xl font-bold font-mono text-purple-400">{selectedSession.onChainOps.splits}</div>
                     <div className="text-xs text-gray-500 uppercase tracking-wider mt-1">Splits</div>
                   </div>
-                  <div className="bg-poly-dark/50 rounded-xl p-4 text-center">
+                  <div className="inset-tile p-4 text-center">
                     <div className="text-2xl font-bold font-mono text-blue-400">{selectedSession.onChainOps.merges}</div>
                     <div className="text-xs text-gray-500 uppercase tracking-wider mt-1">Merges</div>
                   </div>
-                  <div className="bg-poly-dark/50 rounded-xl p-4 text-center">
+                  <div className="inset-tile p-4 text-center">
                     <div className="text-2xl font-bold font-mono text-green-400">{selectedSession.onChainOps.redeems}</div>
                     <div className="text-xs text-gray-500 uppercase tracking-wider mt-1">Redeems</div>
                   </div>
-                  <div className="bg-poly-dark/50 rounded-xl p-4 text-center">
+                  <div className="inset-tile p-4 text-center">
                     <div className="text-2xl font-bold font-mono text-yellow-400">{selectedSession.onChainOps.swaps}</div>
                     <div className="text-xs text-gray-500 uppercase tracking-wider mt-1">Swaps</div>
                   </div>
@@ -322,14 +324,13 @@ export function HistoryPage({ onBack }: HistoryPageProps) {
               <div className="panel">
                 <div className="panel-header">
                   <h3 className="section-header mb-0">
-                    <div className="section-header-icon bg-gradient-to-br from-green-500/20 to-emerald-500/20">💹</div>
                     Trade History
                   </h3>
                 </div>
                 <div className="panel-body">
                   <div className="space-y-2 max-h-96 overflow-y-auto">
                     {selectedSession.trades.map((trade) => (
-                      <div key={trade.id} className="flex items-center justify-between p-3 rounded-xl bg-poly-dark/50 border border-white/5">
+                      <div key={trade.id} className="flex items-center justify-between p-3 inset-tile border border-white/5">
                         <div className="flex items-center gap-4">
                           <span className="text-xs text-gray-500 font-mono w-16">
                             {formatTime(trade.timestamp)}
@@ -427,6 +428,7 @@ export function HistoryPage({ onBack }: HistoryPageProps) {
           </div>
         )}
       </main>
+      </div>
     </div>
   );
 }

@@ -28,7 +28,7 @@ export function Header({ state, config, connected, onHistoryClick, onPositionsCl
       if (hours > 0) {
         setRuntime(`${hours}h ${minutes}m`);
       } else if (minutes > 0) {
-        setRuntime(`${minutes}m ${seconds}s`);
+        setRuntime(`${minutes}m ${seconds.toString().padStart(2, '0')}s`);
       } else {
         setRuntime(`${seconds}s`);
       }
@@ -44,7 +44,7 @@ export function Header({ state, config, connected, onHistoryClick, onPositionsCl
 
   // Mock wallet address (in real app, this would come from config/state)
   const walletAddress = '0xaF98e0638671abD5140Ad981Ff4c01869F3410de';
-  const shortWallet = `${walletAddress.slice(0, 6)}...${walletAddress.slice(-4)}`;
+  const shortWallet = `${walletAddress.slice(0, 6)}…${walletAddress.slice(-4)}`;
 
   const copyWallet = async () => {
     await navigator.clipboard.writeText(walletAddress);
@@ -55,143 +55,115 @@ export function Header({ state, config, connected, onHistoryClick, onPositionsCl
   const signalCount = state?.dipArb?.signals?.length ?? 0;
   const opportunityCount = state?.arbitrage?.opportunitiesFound ?? 0;
 
+  const statusBadge = connected
+    ? isPaused
+      ? { className: 'badge-yellow', dot: '#ffc46b', label: 'PAUSED', pulse: false }
+      : { className: 'badge-green', dot: '#34e0b0', label: 'RUNNING', pulse: true }
+    : { className: 'badge-red', dot: '#ff6b7a', label: 'OFFLINE', pulse: false };
+
   return (
-    <header className="glass-card border-b border-white/5 px-6 py-4">
-      <div className="flex items-center justify-between">
-        {/* Left: Logo + Status */}
-        <div className="flex items-center gap-6">
-          {/* Logo */}
-          <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-purple-500 to-blue-500 flex items-center justify-center text-xl shadow-glow-purple">
-              🤖
-            </div>
-            <div>
-              <h1 className="text-xl font-bold text-white tracking-tight">
-                Polymarket Bot
-              </h1>
-              <div className="text-xs text-gray-500">v3.0 Professional</div>
-            </div>
-          </div>
-
-          {/* Status Badges */}
-          <div className="flex items-center gap-2">
-            <span
-              className={`badge flex items-center gap-1.5 ${connected
-                ? isPaused
-                  ? 'badge-yellow'
-                  : 'badge-green'
-                : 'badge-red'
-                }`}
-            >
-              <span className={`w-1.5 h-1.5 rounded-full ${connected
-                ? isPaused ? 'bg-yellow-400' : 'bg-green-400 animate-pulse'
-                : 'bg-red-400'
-                }`} />
-              {connected ? (isPaused ? 'PAUSED' : 'RUNNING') : 'OFFLINE'}
-            </span>
-
-            <span className={`badge ${isDryRun ? 'badge-blue' : 'badge-green'}`}>
-              {isDryRun ? '🧪 SIMULATION' : '💰 LIVE'}
-            </span>
+    <header className="dc-rise flex flex-wrap items-center gap-x-5 gap-y-3.5 px-[clamp(14px,2.4vw,40px)] pb-5 pt-[clamp(18px,2.4vw,30px)]">
+      {/* Identity */}
+      <div className="flex min-w-0 items-center gap-3.5">
+        <div
+          className="grid h-[46px] w-[46px] flex-none place-items-center rounded-[14px] border border-[#2a2440]"
+          style={{
+            background: 'linear-gradient(145deg, #1b1630, #0d0d16)',
+            boxShadow: '0 8px 26px rgba(112,86,255,0.22)',
+          }}
+        >
+          <div
+            className="h-3.5 w-3.5 rounded"
+            style={{ background: 'linear-gradient(140deg, #9b8cff, #34e0b0)' }}
+          />
+        </div>
+        <div className="min-w-0">
+          <h1 className="text-xl font-bold leading-[1.1] tracking-[-0.02em] text-white">
+            Polymarket Bot
+          </h1>
+          <div className="mt-[3px] font-mono text-[11px] tracking-[0.08em] text-gray-500">
+            v3.0 · PROFESSIONAL
           </div>
         </div>
+      </div>
 
-        {/* Center: Network Status */}
-        <div className="hidden lg:block">
-          <NetworkStatus connected={connected} />
+      {/* Run state */}
+      <div className="flex flex-wrap items-center gap-2">
+        <span className={`badge ${statusBadge.className}`}>
+          <span
+            className={`h-[7px] w-[7px] rounded-full ${statusBadge.pulse ? 'animate-dot' : ''}`}
+            style={{ background: statusBadge.dot }}
+          />
+          {statusBadge.label}
+        </span>
+
+        <span className={`badge ${isDryRun ? 'badge-purple' : 'badge-green'}`}>
+          {isDryRun ? 'SIMULATION' : 'LIVE'}
+        </span>
+
+        {/* Signal / opportunity counters */}
+        {signalCount > 0 && (
+          <span className="badge badge-neutral tooltip font-mono" data-tooltip="Recent DipArb signals">
+            SIG {Math.min(signalCount, 99)}
+          </span>
+        )}
+        {opportunityCount > 0 && (
+          <span className="badge badge-neutral tooltip font-mono" data-tooltip="Arbitrage opportunities found">
+            OPP {Math.min(opportunityCount, 99)}
+          </span>
+        )}
+      </div>
+
+      {/* Network telemetry */}
+      <div className="hidden 2xl:block">
+        <NetworkStatus connected={connected} />
+      </div>
+
+      {/* Runtime + wallet + actions */}
+      <div className="flex flex-1 flex-wrap items-center justify-end gap-2">
+        <div className="pr-1.5 text-right">
+          <div className="text-[10px] tracking-[0.14em] text-gray-500">RUNTIME</div>
+          <div className="font-mono text-[15px] font-medium text-gray-300">{runtime}</div>
         </div>
 
-        {/* Right: Stats + Wallet */}
-        <div className="flex items-center gap-6">
-          {/* History Button */}
+        <button
+          onClick={copyWallet}
+          title="Copy wallet address"
+          className="inline-flex items-center gap-2.5 rounded-control border border-[#1e1e2a] bg-[#0d0d15] px-3.5 py-2.5 font-mono text-xs text-gray-400 transition-colors hover:border-[#2b2b3c] hover:text-white"
+        >
+          <span
+            className="h-[18px] w-[18px] rounded-full"
+            style={{ background: 'linear-gradient(140deg, #9b8cff, #4b3ba8)' }}
+          />
+          {shortWallet}
+          <span className="text-gray-500">{copied ? '✓' : '⧉'}</span>
+        </button>
+
+        <button onClick={onHistoryClick} className="btn btn-secondary">
+          History
+        </button>
+
+        <button onClick={onPositionsClick} className="btn btn-secondary">
+          Positions
+        </button>
+
+        {isDryRun && (
           <button
-            onClick={onHistoryClick}
-            className="btn btn-secondary text-sm"
+            onClick={onResetPaper}
+            className="btn btn-secondary"
+            title="Reset the paper account and simulation risk counters"
           >
-            <span>📚</span>
-            History
+            Reset sim
           </button>
+        )}
 
-          {/* Positions Button */}
-          <button
-            onClick={onPositionsClick}
-            className="btn btn-secondary text-sm"
-          >
-            <span>📦</span>
-            Positions
-          </button>
-
-          {/* Toggle Dry Run / Live */}
-          <button
-            onClick={onToggleDryRun}
-            className={`btn text-sm ${isDryRun
-                ? 'bg-green-500/10 border-green-500/30 hover:bg-green-500/20 text-green-300'
-                : 'bg-red-500/10 border-red-500/30 hover:bg-red-500/20 text-red-300'
-              }`}
-          >
-            <span>{isDryRun ? '💰' : '🧪'}</span>
-            Switch to {isDryRun ? 'LIVE' : 'SIMULATION'}
-          </button>
-
-          {isDryRun && (
-            <button
-              onClick={onResetPaper}
-              className="btn btn-secondary text-sm"
-              title="Reset the paper account and simulation risk counters"
-            >
-              <span>🔄</span>
-              Reset sim
-            </button>
-          )}
-
-          <div className="w-px h-8 bg-white/10" />
-
-          {/* Notification Badges */}
-          <div className="flex items-center gap-3">
-            {signalCount > 0 && (
-              <div className="relative tooltip" data-tooltip="Recent Signals">
-                <div className="w-9 h-9 rounded-lg bg-purple-500/20 flex items-center justify-center text-sm">
-                  🎯
-                </div>
-                <span className="absolute -top-1 -right-1 w-5 h-5 rounded-full bg-purple-500 text-white text-xs flex items-center justify-center font-bold">
-                  {Math.min(signalCount, 99)}
-                </span>
-              </div>
-            )}
-            {opportunityCount > 0 && (
-              <div className="relative tooltip" data-tooltip="Opportunities Found">
-                <div className="w-9 h-9 rounded-lg bg-green-500/20 flex items-center justify-center text-sm">
-                  💎
-                </div>
-                <span className="absolute -top-1 -right-1 w-5 h-5 rounded-full bg-green-500 text-white text-xs flex items-center justify-center font-bold">
-                  {Math.min(opportunityCount, 99)}
-                </span>
-              </div>
-            )}
-          </div>
-
-          {/* Runtime */}
-          <div className="text-right">
-            <div className="text-xs text-gray-500 uppercase tracking-wider">Runtime</div>
-            <div className="text-lg font-mono font-bold text-white">{runtime}</div>
-          </div>
-
-          <div className="w-px h-10 bg-white/10" />
-
-          {/* Wallet */}
-          <button
-            onClick={copyWallet}
-            className="flex items-center gap-2 px-3 py-2 rounded-lg bg-poly-dark/50 border border-poly-border hover:border-poly-purple/50 transition-all group"
-          >
-            <div className="w-6 h-6 rounded-full bg-gradient-to-br from-purple-400 to-blue-400" />
-            <span className="font-mono text-sm text-gray-300 group-hover:text-white transition-colors">
-              {shortWallet}
-            </span>
-            <span className="text-gray-500 group-hover:text-gray-300 transition-colors">
-              {copied ? '✓' : '📋'}
-            </span>
-          </button>
-        </div>
+        <button
+          onClick={onToggleDryRun}
+          className={`btn ${isDryRun ? 'btn-success' : 'btn-danger'}`}
+          title={isDryRun ? 'Switch to live trading' : 'Switch back to simulation'}
+        >
+          Switch to {isDryRun ? 'LIVE' : 'SIMULATION'}
+        </button>
       </div>
     </header>
   );

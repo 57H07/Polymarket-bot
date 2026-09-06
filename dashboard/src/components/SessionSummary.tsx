@@ -23,36 +23,33 @@ export function SessionSummary({ state }: SessionSummaryProps) {
     <div className="panel">
       <div className="panel-header">
         <h2 className="section-header mb-0">
-          <div className="section-header-icon bg-gradient-to-br from-purple-500/20 to-blue-500/20">
-            📊
-          </div>
           Session Summary
         </h2>
       </div>
 
       <div className="panel-body">
         {/* Win/Loss Stats */}
-        <div className="grid grid-cols-4 gap-4 mb-6">
+        <div className="grid grid-cols-4 gap-2 mb-6">
           <div className="text-center">
-            <div className="text-3xl font-bold font-mono text-green-400 glow-text-green">
+            <div className="metric-value text-[clamp(17px,1.5vw,26px)] text-green-400 glow-text-green">
               {wins}
             </div>
             <div className="text-xs text-gray-500 uppercase tracking-wider mt-1">Wins</div>
           </div>
           <div className="text-center">
-            <div className="text-3xl font-bold font-mono text-red-400">
+            <div className="metric-value text-[clamp(17px,1.5vw,26px)] text-red-400">
               {losses}
             </div>
             <div className="text-xs text-gray-500 uppercase tracking-wider mt-1">Losses</div>
           </div>
           <div className="text-center">
-            <div className={`text-3xl font-bold font-mono ${winRate >= 50 ? 'text-green-400' : 'text-red-400'}`}>
+            <div className={`metric-value text-[clamp(17px,1.5vw,26px)] ${winRate >= 50 ? 'text-green-400' : 'text-red-400'}`}>
               {winRate.toFixed(0)}%
             </div>
             <div className="text-xs text-gray-500 uppercase tracking-wider mt-1">Win Rate</div>
           </div>
           <div className="text-center">
-            <div className={`text-3xl font-bold font-mono ${avgProfit >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+            <div className={`metric-value text-[clamp(17px,1.5vw,26px)] ${avgProfit >= 0 ? 'text-green-400' : 'text-red-400'}`}>
               ${avgProfit.toFixed(2)}
             </div>
             <div className="text-xs text-gray-500 uppercase tracking-wider mt-1">Avg/Trade</div>
@@ -65,7 +62,7 @@ export function SessionSummary({ state }: SessionSummaryProps) {
             <span>Win Rate Distribution</span>
             <span>{wins}W - {losses}L</span>
           </div>
-          <div className="h-3 rounded-full bg-gray-800 overflow-hidden flex">
+          <div className="h-3 rounded-full bg-[#16161f] overflow-hidden flex">
             <div 
               className="h-full progress-gradient-green transition-all duration-500"
               style={{ width: `${winRate}%` }}

@@ -9,69 +9,74 @@ export function StrategyGrid({ state, config }: StrategyGridProps) {
   const strategies = [
     {
       name: 'Smart Money',
-      icon: '👛',
       enabled: config?.smartMoney?.enabled ?? false,
       trades: state?.smartMoneyTrades ?? 0,
       detail: `${state?.followedWallets?.length ?? 0} wallets`,
-      color: 'from-pink-500/20 to-purple-500/20',
-      badgeColor: 'bg-pink-500/20 text-pink-400 border-pink-500/30',
+      color: '#9b8cff',
     },
     {
       name: 'Arbitrage',
-      icon: '🔄',
       enabled: config?.arbitrage?.enabled ?? false,
       trades: state?.arbTrades ?? 0,
-      detail: 'Price gaps',
-      color: 'from-blue-500/20 to-cyan-500/20',
-      badgeColor: 'bg-blue-500/20 text-blue-400 border-blue-500/30',
+      detail: 'price gaps',
+      color: '#4aa8ff',
     },
     {
       name: 'DipArb',
-      icon: '📉',
       enabled: config?.dipArb?.enabled ?? false,
       trades: state?.dipArbTrades ?? 0,
-      detail: 'Sum target',
-      color: 'from-green-500/20 to-emerald-500/20',
-      badgeColor: 'bg-green-500/20 text-green-400 border-green-500/30',
+      detail: 'sum target',
+      color: '#34e0b0',
     },
     {
       name: 'Direct',
-      icon: '⚡',
       enabled: config?.directTrading?.enabled ?? false,
       trades: state?.directTrades ?? 0,
-      detail: 'Trend-based',
-      color: 'from-yellow-500/20 to-orange-500/20',
-      badgeColor: 'bg-yellow-500/20 text-yellow-400 border-yellow-500/30',
+      detail: 'trend-based',
+      color: '#ffc46b',
     },
   ];
 
-  const activeCount = strategies.filter(s => s.enabled).length;
+  const activeCount = strategies.filter((s) => s.enabled).length;
 
   return (
-    <div className="glass-card rounded-xl p-3">
-      <div className="flex items-center justify-between mb-3">
-        <div className="flex items-center gap-2">
-          <span className="text-base">🎯</span>
-          <span className="text-sm font-medium text-white">Strategies</span>
-        </div>
-        <span className="text-[10px] text-gray-500">{activeCount}/4 active</span>
+    <div className="panel dc-rise" style={{ animationDelay: '0.34s' }}>
+      <div className="panel-header">
+        <h3 className="text-[15px] font-bold tracking-[-0.01em] text-white">Strategy Activity</h3>
+        <span className="font-mono text-[10.5px] text-gray-500">{activeCount}/4 ACTIVE</span>
       </div>
-      <div className="grid grid-cols-2 xl:grid-cols-4 gap-2">
+      <div className="panel-body grid grid-cols-2 gap-2 xl:grid-cols-4">
         {strategies.map((s) => (
           <div
             key={s.name}
-            className={`p-2.5 rounded-lg bg-gradient-to-br ${s.color} border border-white/5`}
+            className="rounded-[14px] border px-3 py-2.5"
+            style={{
+              background: s.enabled
+                ? `linear-gradient(120deg, ${s.color}14, rgba(255,255,255,0.012))`
+                : '#0b0b12',
+              borderColor: s.enabled ? `${s.color}33` : '#1a1a25',
+            }}
           >
-            <div className="flex items-center justify-between mb-1.5">
-              <span className="text-lg">{s.icon}</span>
-              <span className={`text-[9px] px-1.5 py-0.5 rounded-full border ${s.enabled ? s.badgeColor : 'bg-gray-500/20 text-gray-500 border-gray-500/30'}`}>
-                {s.enabled ? '● ON' : 'OFF'}
+            <div className="flex items-center justify-between gap-2">
+              <span
+                className="truncate text-xs font-semibold"
+                style={{ color: s.enabled ? '#e4e4f0' : '#9494ad' }}
+              >
+                {s.name}
               </span>
+              <span
+                className="h-1.5 w-1.5 flex-none rounded-full"
+                style={{ background: s.enabled ? s.color : '#2c2c3c' }}
+              />
             </div>
-            <div className="text-xs font-medium text-white truncate">{s.name}</div>
-            <div className="flex items-baseline justify-between mt-1">
-              <span className="text-lg font-bold font-mono text-white">{s.trades}</span>
-              <span className="text-[10px] text-gray-500 truncate">{s.detail}</span>
+            <div className="mt-2 flex items-baseline justify-between gap-2">
+              <span
+                className="metric-value text-lg"
+                style={{ color: s.enabled ? s.color : '#6f6f88' }}
+              >
+                {s.trades}
+              </span>
+              <span className="truncate font-mono text-[10px] text-gray-500">{s.detail}</span>
             </div>
           </div>
         ))}

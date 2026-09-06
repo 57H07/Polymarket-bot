@@ -5,31 +5,35 @@ interface BalanceCardsProps {
 }
 
 interface BalanceCardProps {
-  icon: string;
   label: string;
   value: string;
   subLabel?: string;
-  gradient: string;
-  iconBg: string;
+  /** Hex accent for the value and the corner aura. */
+  color: string;
+  delay: number;
 }
 
-function BalanceCard({ icon, label, value, subLabel, gradient, iconBg }: BalanceCardProps) {
+function BalanceCard({ label, value, subLabel, color, delay }: BalanceCardProps) {
   return (
-    <div className={`glass-card glass-card-hover rounded-lg p-3 ${gradient}`}>
-      <div className="flex items-center gap-3">
-        <div className={`w-8 h-8 rounded-lg flex items-center justify-center text-base ${iconBg}`}>
-          {icon}
-        </div>
-        <div className="flex-1 min-w-0">
-          <div className="text-[10px] text-gray-500 uppercase tracking-wider">{label}</div>
-          <div className="text-lg font-bold font-mono text-white truncate">
-            {value}
-          </div>
-        </div>
-        {subLabel && (
-          <div className="text-[10px] text-gray-600 hidden xl:block">{subLabel}</div>
-        )}
+    <div
+      className="card-sheen glass-card glass-card-hover dc-rise relative overflow-hidden px-4 py-3.5"
+      style={{ borderRadius: '16px', animationDelay: `${delay.toFixed(2)}s` }}
+    >
+      <div
+        aria-hidden="true"
+        className="pointer-events-none absolute -top-8 -right-8 h-24 w-24 rounded-full blur-[6px]"
+        style={{ background: `radial-gradient(circle, ${color}1f, transparent 68%)` }}
+      />
+      <div className="relative flex items-center justify-between gap-2">
+        <span className="metric-label truncate">{label}</span>
+        <span className="h-1.5 w-1.5 flex-none rounded-full" style={{ background: color }} />
       </div>
+      <div className="metric-value relative mt-2.5 truncate text-xl" style={{ color }}>
+        {value}
+      </div>
+      {subLabel && (
+        <div className="relative mt-2 truncate font-mono text-[10px] text-gray-500">{subLabel}</div>
+      )}
     </div>
   );
 }
@@ -54,76 +58,68 @@ export function BalanceCards({ state }: BalanceCardsProps) {
     const equity = p.balance + (state.positions ?? []).reduce((s, pos: any) => s + (Number(pos.curPrice) || 0) * (Number(pos.size) || 0), 0);
     const sign = (v: number) => `${v >= 0 ? '+' : '-'}$${formatCurrency(Math.abs(v))}`;
     return (
-      <div className="grid grid-cols-2 xl:grid-cols-4 gap-2">
+      <div className="grid grid-cols-2 gap-3 xl:grid-cols-4">
         <BalanceCard
-          icon="🧪"
           label="Paper cash"
           value={`$${formatCurrency(p.balance)}`}
           subLabel={`start $${formatCurrency(p.initialBalance)}`}
-          gradient="bg-gradient-to-br from-blue-500/10 to-blue-500/5"
-          iconBg="bg-blue-500/20"
+          color="#4aa8ff"
+          delay={0.06}
         />
         <BalanceCard
-          icon="🏦"
           label="Equity"
           value={`$${formatCurrency(equity)}`}
           subLabel="cash + positions"
-          gradient="bg-gradient-to-br from-yellow-500/10 to-orange-500/5"
-          iconBg="bg-yellow-500/20"
+          color="#ffc46b"
+          delay={0.12}
         />
         <BalanceCard
-          icon="✅"
           label="Realised"
           value={sign(realized)}
           subLabel={`${p.trades} fills`}
-          gradient={realized >= 0 ? 'bg-gradient-to-br from-green-500/10 to-green-500/5' : 'bg-gradient-to-br from-red-500/10 to-red-500/5'}
-          iconBg={realized >= 0 ? 'bg-green-500/20' : 'bg-red-500/20'}
+          color={realized >= 0 ? '#34e0b0' : '#ff6b7a'}
+          delay={0.18}
         />
         <BalanceCard
-          icon="📈"
           label="Unrealised"
           value={sign(unrealized)}
           subLabel="open positions"
-          gradient={unrealized >= 0 ? 'bg-gradient-to-br from-green-500/10 to-green-500/5' : 'bg-gradient-to-br from-red-500/10 to-red-500/5'}
-          iconBg={unrealized >= 0 ? 'bg-green-500/20' : 'bg-red-500/20'}
+          color={unrealized >= 0 ? '#34e0b0' : '#ff6b7a'}
+          delay={0.24}
         />
       </div>
     );
   }
 
   return (
-    <div className="grid grid-cols-2 xl:grid-cols-4 gap-2">
+    <div className="grid grid-cols-2 gap-3 xl:grid-cols-4">
       <BalanceCard
-        icon="💜"
         label="MATIC"
         value={formatCurrency(matic, 4)}
-        subLabel="Gas"
-        gradient="bg-gradient-to-br from-purple-500/10 to-purple-500/5"
-        iconBg="bg-purple-500/20"
+        subLabel="gas"
+        color="#9b8cff"
+        delay={0.06}
       />
       <BalanceCard
-        icon="💵"
         label="USDC"
         value={`$${formatCurrency(usdc)}`}
-        subLabel="Bridged"
-        gradient="bg-gradient-to-br from-green-500/10 to-green-500/5"
-        iconBg="bg-green-500/20"
+        subLabel="bridged"
+        color="#34e0b0"
+        delay={0.12}
       />
       <BalanceCard
-        icon="💰"
         label="USDC.e"
         value={`$${formatCurrency(usdce)}`}
-        subLabel="Native"
-        gradient="bg-gradient-to-br from-blue-500/10 to-blue-500/5"
-        iconBg="bg-blue-500/20"
+        subLabel="native"
+        color="#4aa8ff"
+        delay={0.18}
       />
       <BalanceCard
-        icon="🏦"
         label="Total"
         value={`$${formatCurrency(total)}`}
-        subLabel="Capital"
-        gradient="bg-gradient-to-br from-yellow-500/10 to-orange-500/5"
-        iconBg="bg-yellow-500/20"
+        subLabel="capital"
+        color="#ffc46b"
+        delay={0.24}
       />
     </div>
   );

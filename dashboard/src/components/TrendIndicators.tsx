@@ -6,44 +6,48 @@ interface TrendIndicatorsProps {
 
 type Trend = 'up' | 'down' | 'neutral';
 
-export function TrendIndicators({ state }: TrendIndicatorsProps) {
-  const getTrendBadge = (t: Trend) => {
-    switch (t) {
-      case 'up': return { arrow: '↗', class: 'badge-green' };
-      case 'down': return { arrow: '↘', class: 'badge-red' };
-      default: return { arrow: '→', class: 'bg-gray-500/20 text-gray-400 border border-gray-500/30' };
-    }
-  };
+const TREND_STYLE: Record<Trend, { label: string; color: string }> = {
+  up: { label: '▲ BULL', color: '#34e0b0' },
+  down: { label: '▼ BEAR', color: '#ff6b7a' },
+  neutral: { label: '→ FLAT', color: '#9a9ab2' },
+};
 
-  const trends = [
-    { coin: 'BTC', icon: '₿', trend: state?.btcTrend ?? 'neutral', color: 'bg-orange-500/20' },
-    { coin: 'ETH', icon: 'Ξ', trend: state?.ethTrend ?? 'neutral', color: 'bg-blue-500/20' },
-    { coin: 'SOL', icon: '◎', trend: state?.solTrend ?? 'neutral', color: 'bg-purple-500/20' },
+export function TrendIndicators({ state }: TrendIndicatorsProps) {
+  const trends: { coin: string; glyph: string; trend: Trend }[] = [
+    { coin: 'BTC', glyph: '₿', trend: (state?.btcTrend ?? 'neutral') as Trend },
+    { coin: 'ETH', glyph: 'Ξ', trend: (state?.ethTrend ?? 'neutral') as Trend },
+    { coin: 'SOL', glyph: '◎', trend: (state?.solTrend ?? 'neutral') as Trend },
   ];
 
   return (
-    <div className="glass-card rounded-xl p-3">
-      <div className="flex items-center justify-between mb-3">
-        <div className="flex items-center gap-2">
-          <span className="text-base">📊</span>
-          <span className="text-sm font-medium text-white">Market Trends</span>
-        </div>
-        <span className="text-[10px] text-gray-500">15m K-lines</span>
+    <div className="panel dc-rise" style={{ animationDelay: '0.3s' }}>
+      <div className="panel-header">
+        <h3 className="text-[15px] font-bold tracking-[-0.01em] text-white">Market Trends</h3>
+        <span className="font-mono text-[10.5px] text-gray-500">15m K-LINES</span>
       </div>
-      <div className="flex gap-2">
-        {trends.map(({ coin, icon, trend, color }) => {
-          const badge = getTrendBadge(trend as Trend);
+      <div className="panel-body grid gap-2 [grid-template-columns:repeat(auto-fit,minmax(110px,1fr))]">
+        {trends.map(({ coin, glyph, trend }) => {
+          const style = TREND_STYLE[trend];
           return (
-            <div key={coin} className="flex-1 flex items-center justify-between p-2 rounded-lg bg-poly-dark/50">
-              <div className="flex items-center gap-2">
-                <div className={`w-6 h-6 rounded-md ${color} flex items-center justify-center text-xs`}>
-                  {icon}
-                </div>
-                <span className="text-xs font-medium text-white">{coin}</span>
+            <div key={coin} className="inset-tile px-3 py-3">
+              <div className="flex items-center justify-between gap-2">
+                <span className="font-mono text-xs font-bold text-gray-300">{coin}</span>
+                <span
+                  className="text-[10px] font-bold tracking-[0.08em]"
+                  style={{ color: style.color }}
+                >
+                  {style.label}
+                </span>
               </div>
-              <span className={`badge text-[10px] px-1.5 py-0.5 ${badge.class}`}>
-                {badge.arrow} {trend.toUpperCase()}
-              </span>
+              <div className="mt-2 flex items-baseline justify-between gap-2">
+                <span className="text-lg leading-none text-gray-400">{glyph}</span>
+                <span
+                  className="font-mono text-[11px] uppercase"
+                  style={{ color: style.color }}
+                >
+                  {trend}
+                </span>
+              </div>
             </div>
           );
         })}

@@ -37,10 +37,10 @@ export function Sparkline({
         : color;
 
     const colorMap = {
-        green: { stroke: '#10b981', fill: 'rgba(16, 185, 129, 0.2)' },
-        red: { stroke: '#ef4444', fill: 'rgba(239, 68, 68, 0.2)' },
-        blue: { stroke: '#3b82f6', fill: 'rgba(59, 130, 246, 0.2)' },
-        purple: { stroke: '#8b5cf6', fill: 'rgba(139, 92, 246, 0.2)' },
+        green: { stroke: '#34e0b0', fill: 'rgba(52, 224, 176, 0.2)' },
+        red: { stroke: '#ff6b7a', fill: 'rgba(255, 107, 122, 0.2)' },
+        blue: { stroke: '#4aa8ff', fill: 'rgba(74, 168, 255, 0.2)' },
+        purple: { stroke: '#9b8cff', fill: 'rgba(155, 140, 255, 0.2)' },
     };
 
     const colors = colorMap[resolvedColor];

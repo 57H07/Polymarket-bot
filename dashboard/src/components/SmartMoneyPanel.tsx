@@ -24,12 +24,9 @@ export function SmartMoneyPanel({ state }: SmartMoneyPanelProps) {
   };
 
   return (
-    <div className="panel">
+    <div className="panel dc-rise flex h-full flex-col" style={{ animationDelay: '0.26s' }}>
       <div className="panel-header">
         <h2 className="section-header mb-0">
-          <div className="section-header-icon bg-gradient-to-br from-pink-500/20 to-purple-500/20">
-            👛
-          </div>
           <div className="flex flex-col">
             <span className="text-[10px] text-purple-400 uppercase tracking-wider font-medium">Strategy 1</span>
             <span>Smart Money Tracker</span>
@@ -45,18 +42,18 @@ export function SmartMoneyPanel({ state }: SmartMoneyPanelProps) {
         </div>
       </div>
 
-      <div className="panel-body">
+      <div className="panel-body flex min-h-0 flex-1 flex-col">
         {/* Stats Row */}
         <div className="grid grid-cols-3 gap-4 mb-5">
-          <div className="bg-poly-dark/50 rounded-xl p-4 text-center">
+          <div className="inset-tile p-4 text-center">
             <div className="text-2xl font-bold font-mono text-purple-400">{followedWallets.length}</div>
             <div className="text-xs text-gray-500 uppercase tracking-wider mt-1">Tracking</div>
           </div>
-          <div className="bg-poly-dark/50 rounded-xl p-4 text-center">
+          <div className="inset-tile p-4 text-center">
             <div className="text-2xl font-bold font-mono text-blue-400">{signals.length}</div>
             <div className="text-xs text-gray-500 uppercase tracking-wider mt-1">Signals</div>
           </div>
-          <div className="bg-poly-dark/50 rounded-xl p-4 text-center">
+          <div className="inset-tile p-4 text-center">
             <div className="text-2xl font-bold font-mono text-green-400">{trades}</div>
             <div className="text-xs text-gray-500 uppercase tracking-wider mt-1">Copied</div>
           </div>
@@ -68,10 +65,9 @@ export function SmartMoneyPanel({ state }: SmartMoneyPanelProps) {
           <span className="text-gray-600">{signals.length} signals</span>
         </div>
         
-        <div className="space-y-2 max-h-64 overflow-y-auto">
+        <div className="min-h-0 flex-1 space-y-2 overflow-y-auto">
           {signals.length === 0 ? (
-            <div className="bg-poly-dark/30 rounded-xl p-8 text-center">
-              <div className="text-4xl mb-3">🐋</div>
+            <div className="inset-tile p-8 text-center">
               <div className="text-gray-400">Monitoring whale wallets...</div>
               <div className="text-xs text-gray-500 mt-1">Signals appear when whales make trades</div>
             </div>
@@ -79,7 +75,7 @@ export function SmartMoneyPanel({ state }: SmartMoneyPanelProps) {
             signals.slice(0, 10).map((signal) => (
               <div
                 key={signal.id}
-                className="flex items-center justify-between p-3 bg-poly-dark/50 rounded-xl border border-white/5 hover:border-white/10 transition-colors"
+                className="flex items-center justify-between p-3 inset-tile border border-white/5 hover:border-white/10 transition-colors"
               >
                 <div className="flex items-center gap-3">
                   <div className="text-xs text-gray-500 font-mono w-16">
@@ -128,7 +124,7 @@ export function SmartMoneyPanel({ state }: SmartMoneyPanelProps) {
               {followedWallets.slice(0, 5).map((wallet) => (
                 <code
                   key={wallet}
-                  className="px-2 py-1 bg-poly-dark/50 rounded text-xs text-gray-400 font-mono"
+                  className="px-2 py-1 bg-poly-gray rounded text-xs text-gray-400 font-mono"
                 >
                   {shortenAddress(wallet)}
                 </code>

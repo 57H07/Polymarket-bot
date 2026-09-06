@@ -36,44 +36,38 @@ export function NetworkStatus({ connected }: NetworkStatusProps) {
   };
 
   return (
-    <div className="flex items-center gap-4 text-xs">
-      {/* Connection Status */}
-      <div className="flex items-center gap-2">
-        <div className={`status-dot ${connected ? 'status-dot-active animate-pulse' : 'status-dot-error'}`} />
+    <div className="inline-flex items-center gap-3.5 rounded-control border border-[#1e1e2a] bg-white/[0.03] px-3.5 py-2 font-mono text-[11px]">
+      {/* Latency, with the canvas's spinner ring */}
+      <span className="flex items-center gap-2" title="Round-trip latency">
+        <span className="spinner-ring" />
+        <span className={getLatencyColor(latency)}>{latency.toFixed(0)}ms</span>
+      </span>
+
+      <span className="h-3 w-px bg-white/10" />
+
+      {/* Gas price */}
+      <span className="flex items-center gap-1.5" title="Polygon gas price">
+        <span className="text-gray-600">GAS</span>
+        <span className={getGasColor(gasPrice)}>{gasPrice.toFixed(0)}</span>
+      </span>
+
+      <span className="h-3 w-px bg-white/10" />
+
+      {/* Block height */}
+      <span className="flex items-center gap-1.5" title="Latest Polygon block">
+        <span className="text-gray-600">BLOCK</span>
+        <span className="text-gray-400">{blockNumber.toLocaleString('en-US').replace(/,/g, ' ')}</span>
+      </span>
+
+      <span className="h-3 w-px bg-white/10" />
+
+      {/* Socket state */}
+      <span className="flex items-center gap-2">
+        <span className={`status-dot ${connected ? 'status-dot-active animate-dot' : 'status-dot-error'}`} />
         <span className={connected ? 'text-green-400' : 'text-red-400'}>
-          {connected ? 'Connected' : 'Disconnected'}
+          {connected ? 'LINKED' : 'DOWN'}
         </span>
-      </div>
-
-      <div className="w-px h-4 bg-white/10" />
-
-      {/* Gas Price */}
-      <div className="flex items-center gap-1.5">
-        <span className="text-gray-500">⛽</span>
-        <span className={`font-mono ${getGasColor(gasPrice)}`}>
-          {gasPrice.toFixed(0)} gwei
-        </span>
-      </div>
-
-      <div className="w-px h-4 bg-white/10" />
-
-      {/* Block Number */}
-      <div className="flex items-center gap-1.5">
-        <span className="text-gray-500">🔗</span>
-        <span className="font-mono text-gray-400">
-          #{blockNumber.toLocaleString()}
-        </span>
-      </div>
-
-      <div className="w-px h-4 bg-white/10" />
-
-      {/* Latency */}
-      <div className="flex items-center gap-1.5">
-        <span className="text-gray-500">📡</span>
-        <span className={`font-mono ${getLatencyColor(latency)}`}>
-          {latency.toFixed(0)}ms
-        </span>
-      </div>
+      </span>
     </div>
   );
 }

@@ -20,3 +20,5 @@ export { Sparkline } from './Sparkline';
 export { PositionsPage } from './PositionsPage';
 export { StrategyControls } from './StrategyControls';
 
+export { AmbientBackground } from './AmbientBackground';
+export { KpiCard } from './KpiCard';

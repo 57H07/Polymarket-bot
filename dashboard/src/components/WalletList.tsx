@@ -33,9 +33,6 @@ export function WalletList({ state }: WalletListProps) {
     <div className="panel h-full">
       <div className="panel-header">
         <h2 className="section-header mb-0">
-          <div className="section-header-icon bg-gradient-to-br from-purple-500/20 to-pink-500/20">
-            👥
-          </div>
           Followed Wallets
         </h2>
         <span className="badge badge-purple">
@@ -46,7 +43,6 @@ export function WalletList({ state }: WalletListProps) {
       <div className="panel-body">
         {wallets.length === 0 ? (
           <div className="text-center py-8">
-            <div className="text-4xl mb-3">🔍</div>
             <div className="text-gray-400">No wallets configured</div>
             <div className="text-xs text-gray-500 mt-1">Add wallets in bot-config.ts</div>
           </div>
@@ -55,7 +51,7 @@ export function WalletList({ state }: WalletListProps) {
             {wallets.map((wallet, index) => (
               <div
                 key={wallet}
-                className="flex items-center justify-between p-3 bg-poly-dark/50 rounded-xl border border-white/5 hover:border-white/10 transition-all group"
+                className="flex items-center justify-between p-3 inset-tile border border-white/5 hover:border-white/10 transition-all group"
               >
                 <div className="flex items-center gap-3">
                   <div className="relative">
@@ -75,7 +71,7 @@ export function WalletList({ state }: WalletListProps) {
                     className="p-2 rounded-lg bg-poly-gray hover:bg-poly-border transition-colors text-gray-400 hover:text-white"
                     title="Copy address"
                   >
-                    📋
+                    ⧉
                   </button>
                   <a
                     href={`https://polygonscan.com/address/${wallet}`}
@@ -84,7 +80,7 @@ export function WalletList({ state }: WalletListProps) {
                     className="p-2 rounded-lg bg-poly-gray hover:bg-poly-border transition-colors text-gray-400 hover:text-white"
                     title="View on Polygonscan"
                   >
-                    🔗
+                    ↗
                   </a>
                 </div>
               </div>

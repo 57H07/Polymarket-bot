@@ -37,9 +37,6 @@ export function PnLPanel({ state, config }: PnLPanelProps) {
     <div className="panel h-full">
       <div className="panel-header">
         <h2 className="section-header mb-0">
-          <div className="section-header-icon bg-gradient-to-br from-green-500/20 to-emerald-500/20">
-            📈
-          </div>
           Profit & Loss
         </h2>
         <div className={`badge ${total >= 0 ? 'badge-green' : 'badge-red'}`}>
@@ -83,7 +80,7 @@ export function PnLPanel({ state, config }: PnLPanelProps) {
 
         {/* Sparkline */}
         {pnlHistory.length > 1 && (
-          <div className="bg-poly-dark/50 rounded-xl p-4">
+          <div className="inset-tile p-4">
             <div className="text-xs text-gray-500 uppercase tracking-wider mb-3">Performance</div>
             <Sparkline
               data={pnlHistory}
@@ -99,7 +96,7 @@ export function PnLPanel({ state, config }: PnLPanelProps) {
         {/* Arbitrage Profit */}
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
-            <div className="icon-circle-sm bg-blue-500/20">🔄</div>
+            <span className="h-1.5 w-1.5 rounded-full bg-blue-400" />
             <span className="text-gray-400">Arbitrage Profit</span>
           </div>
           <AnimatedCounter

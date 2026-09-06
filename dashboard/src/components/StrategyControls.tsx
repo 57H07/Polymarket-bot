@@ -5,34 +5,59 @@ interface StrategyControlsProps {
     onToggle: (strategy: string, enabled: boolean) => void;
 }
 
-interface ToggleProps {
+interface StrategyToggleProps {
     label: string;
+    meta: string;
     enabled: boolean;
-    icon: string;
+    /** Hex accent for this strategy — inline, so Tailwind never has to guess. */
     color: string;
     onChange: (enabled: boolean) => void;
 }
 
-function Toggle({ label, enabled, icon, color, onChange }: ToggleProps) {
+function StrategyToggle({ label, meta, enabled, color, onChange }: StrategyToggleProps) {
     return (
-        <div className="flex items-center justify-between p-3 rounded-xl bg-poly-dark/50 border border-white/5">
-            <div className="flex items-center gap-3">
-                <div className={`w-8 h-8 rounded-lg bg-${color}-500/20 flex items-center justify-center text-sm`}>
-                    {icon}
-                </div>
-                <span className="text-white font-medium">{label}</span>
-            </div>
-            <button
-                onClick={() => onChange(!enabled)}
-                className={`relative w-12 h-6 rounded-full transition-all duration-300 ${enabled ? `bg-${color}-500` : 'bg-gray-700'
-                    }`}
+        <button
+            type="button"
+            role="switch"
+            aria-checked={enabled}
+            onClick={() => onChange(!enabled)}
+            className="flex w-full items-center gap-3 rounded-[14px] border px-3.5 py-3 text-left transition-all duration-200 hover:translate-x-0.5"
+            style={{
+                background: enabled
+                    ? `linear-gradient(120deg, ${color}16, rgba(255,255,255,0.012))`
+                    : '#0b0b12',
+                borderColor: enabled ? `${color}3d` : '#1a1a25',
+            }}
+        >
+            <span
+                className="h-2 w-2 flex-none rounded-full"
+                style={{ background: enabled ? color : '#2c2c3c' }}
+            />
+            <span className="min-w-0 flex-1">
+                <span
+                    className="block truncate text-[13.5px] font-semibold"
+                    style={{ color: enabled ? '#eaeaf5' : '#9494ad' }}
+                >
+                    {label}
+                </span>
+                <span className="mt-0.5 block font-mono text-[10.5px] text-gray-500">{meta}</span>
+            </span>
+            <span
+                className="relative h-[21px] w-[38px] flex-none rounded-full border transition-colors duration-200"
+                style={{
+                    background: enabled ? `${color}44` : '#1a1a25',
+                    borderColor: enabled ? `${color}66` : '#24242f',
+                }}
             >
-                <div
-                    className={`absolute top-1 left-1 w-4 h-4 rounded-full bg-white transition-transform duration-300 ${enabled ? 'translate-x-6' : 'translate-x-0'
-                        }`}
+                <span
+                    className="absolute top-0.5 h-[15px] w-[15px] rounded-full transition-all duration-200"
+                    style={{
+                        left: enabled ? '20px' : '3px',
+                        background: enabled ? color : '#3a3a4c',
+                    }}
                 />
-            </button>
-        </div>
+            </span>
+        </button>
     );
 }
 
@@ -42,55 +67,57 @@ export function StrategyControls({ config, onToggle }: StrategyControlsProps) {
     const strategies = [
         {
             key: 'smartMoney',
-            label: 'Smart Money (Copy Trading)',
-            icon: '👛',
-            color: 'purple',
+            label: 'Smart Money',
+            meta: 'copy trading · whale wallets',
+            color: '#9b8cff',
             enabled: config.smartMoney?.enabled ?? false,
         },
         {
             key: 'arbitrage',
             label: 'Arbitrage',
-            icon: '⚖️',
-            color: 'blue',
+            meta: `threshold ${((config.arbitrage?.profitThreshold ?? 0) * 100).toFixed(1)}%`,
+            color: '#4aa8ff',
             enabled: config.arbitrage?.enabled ?? false,
         },
         {
             key: 'dipArb',
-            label: 'DipArb (Crypto Short-Term)',
-            icon: '📉',
-            color: 'green',
+            label: 'DipArb',
+            meta: `crypto short-term · ${config.dipArb?.coins?.length ?? 0} coins`,
+            color: '#34e0b0',
             enabled: config.dipArb?.enabled ?? false,
         },
         {
             key: 'directTrading',
-            label: 'Direct Trading (Trend Following)',
-            icon: '📈',
-            color: 'yellow',
+            label: 'Direct Trading',
+            meta: 'trend following',
+            color: '#ffc46b',
             enabled: config.directTrading?.enabled ?? false,
         },
     ];
 
+    const activeCount = strategies.filter((s) => s.enabled).length;
+
     return (
-        <div className="panel">
+        <div className="panel dc-rise" style={{ animationDelay: '0.22s' }}>
             <div className="panel-header">
-                <h3 className="section-header mb-0">
-                    <div className="section-header-icon bg-gradient-to-br from-purple-500/20 to-blue-500/20">⚙️</div>
-                    Strategy Controls
-                </h3>
+                <h3 className="text-[15px] font-bold tracking-[-0.01em] text-white">Strategies</h3>
+                <span className="font-mono text-[11px] text-gray-500">
+                    {activeCount}/4 ACTIVE
+                </span>
             </div>
             <div className="panel-body space-y-2">
                 {strategies.map((s) => (
-                    <Toggle
+                    <StrategyToggle
                         key={s.key}
                         label={s.label}
-                        icon={s.icon}
+                        meta={s.meta}
                         color={s.color}
                         enabled={s.enabled}
                         onChange={(enabled) => onToggle(s.key, enabled)}
                     />
                 ))}
-                <div className="text-xs text-gray-500 mt-2 text-center">
-                    Changes take effect immediately. You may need sufficient USDC.e for trading strategies.
+                <div className="pt-1 text-center text-[11px] leading-relaxed text-gray-600">
+                    Changes take effect immediately. Trading strategies need sufficient USDC.e.
                 </div>
             </div>
         </div>

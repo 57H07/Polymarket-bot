@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import type { BotState } from '../types';
+import { AmbientBackground } from './AmbientBackground';
 
 interface PositionsPageProps {
     onBack: () => void;
@@ -32,21 +33,26 @@ export function PositionsPage({ onBack, state, onClosePosition, onRedeemPosition
     };
 
     return (
-        <div className="min-h-screen bg-poly-dark text-white">
+        <div className="relative min-h-screen overflow-hidden bg-poly-dark pb-14 text-white">
+            <AmbientBackground accent="#34e0b0" />
+            <div className="app-shell mx-auto max-w-[1760px]">
             {/* Header */}
-            <header className="glass-card border-b border-white/5 px-6 py-4">
-                <div className="flex items-center justify-between max-w-[1600px] mx-auto">
+            <header className="dc-rise px-[clamp(14px,2.4vw,40px)] py-6">
+                <div className="flex flex-wrap items-center justify-between gap-4">
                     <div className="flex items-center gap-4">
                         <button onClick={onBack} className="btn btn-secondary">
                             ← Back to Dashboard
                         </button>
                         <div className="flex items-center gap-3">
-                            <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-green-500 to-emerald-500 flex items-center justify-center text-xl">
-                                📦
+                            <div
+                                className="grid h-10 w-10 flex-none place-items-center rounded-[12px] border border-[#2a2440]"
+                                style={{ background: 'linear-gradient(145deg, #1b1630, #0d0d16)' }}
+                            >
+                                <div className="h-3 w-3 rounded" style={{ background: 'linear-gradient(140deg, #34e0b0, #9b8cff)' }} />
                             </div>
                             <div>
                                 <h1 className="text-xl font-bold">Open Positions</h1>
-                                <div className="text-xs text-gray-500">Monitor and close your positions</div>
+                                <div className="mt-0.5 font-mono text-[11px] tracking-[0.08em] text-gray-500">MONITOR AND CLOSE YOUR POSITIONS</div>
                             </div>
                         </div>
                     </div>
@@ -54,17 +60,16 @@ export function PositionsPage({ onBack, state, onClosePosition, onRedeemPosition
                     {/* Summary Stats */}
                     <div className="flex items-center gap-6">
                         <div className="text-right">
-                            <div className="text-xs text-gray-500 uppercase tracking-wider">Positions</div>
-                            <div className="text-xl font-bold font-mono">{positions.length}</div>
+                            <div className="metric-label">Positions</div>
+                            <div className="metric-value mt-1 text-xl text-white">{positions.length}</div>
                         </div>
                     </div>
                 </div>
             </header>
 
-            <main className="p-6 max-w-[1600px] mx-auto">
+            <main className="px-[clamp(14px,2.4vw,40px)]">
                 {positions.length === 0 ? (
                     <div className="panel p-12 text-center">
-                        <div className="text-6xl mb-4">📭</div>
                         <h2 className="text-xl font-semibold mb-2">No Open Positions</h2>
                         <p className="text-gray-400">
                             You don't have any open positions yet. Start trading to see them here.
@@ -76,7 +81,6 @@ export function PositionsPage({ onBack, state, onClosePosition, onRedeemPosition
                         <div className="panel">
                             <div className="panel-header">
                                 <h3 className="section-header mb-0">
-                                    <div className="section-header-icon bg-gradient-to-br from-green-500/20 to-emerald-500/20">💹</div>
                                     Your Positions
                                 </h3>
                             </div>
@@ -181,6 +185,7 @@ export function PositionsPage({ onBack, state, onClosePosition, onRedeemPosition
                     </div>
                 )}
             </main>
+            </div>
         </div>
     );
 }

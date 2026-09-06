@@ -39,9 +39,6 @@ export function ConfigPanel({ config }: ConfigPanelProps) {
       <div className="panel">
         <div className="panel-header">
           <h2 className="section-header mb-0">
-            <div className="section-header-icon bg-gradient-to-br from-gray-500/20 to-slate-500/20">
-              ⚙️
-            </div>
             Configuration
           </h2>
         </div>
@@ -56,13 +53,10 @@ export function ConfigPanel({ config }: ConfigPanelProps) {
     <div className="panel">
       <div className="panel-header">
         <h2 className="section-header mb-0">
-          <div className="section-header-icon bg-gradient-to-br from-gray-500/20 to-slate-500/20">
-            ⚙️
-          </div>
           Configuration
         </h2>
         <span className={`badge ${config.dryRun ? 'badge-blue' : 'badge-green'}`}>
-          {config.dryRun ? '🧪 Simulation' : '💰 Live'}
+          {config.dryRun ? 'SIMULATION' : 'LIVE'}
         </span>
       </div>
 
@@ -74,7 +68,7 @@ export function ConfigPanel({ config }: ConfigPanelProps) {
               <span className="w-1.5 h-1.5 rounded-full bg-purple-400" />
               General
             </div>
-            <div className="bg-poly-dark/50 rounded-xl p-4 space-y-1 divide-y divide-white/5">
+            <div className="inset-tile p-4 space-y-1 divide-y divide-white/5">
               <ConfigItem label="Mode" value={config.dryRun ? 'Dry Run' : 'Live'} />
               <ConfigItem label="Capital" value={`$${config.capital?.totalUsd ?? 0}`} />
             </div>
@@ -86,7 +80,7 @@ export function ConfigPanel({ config }: ConfigPanelProps) {
               <span className="w-1.5 h-1.5 rounded-full bg-blue-400" />
               Strategies
             </div>
-            <div className="bg-poly-dark/50 rounded-xl p-4 space-y-1 divide-y divide-white/5">
+            <div className="inset-tile p-4 space-y-1 divide-y divide-white/5">
               <ConfigItem label="Smart Money" value={config.smartMoney?.enabled ?? false} type="boolean" />
               <ConfigItem label="Arbitrage" value={config.arbitrage?.enabled ?? false} type="boolean" />
               <ConfigItem label="DipArb" value={config.dipArb?.enabled ?? false} type="boolean" />
@@ -100,7 +94,7 @@ export function ConfigPanel({ config }: ConfigPanelProps) {
               <span className="w-1.5 h-1.5 rounded-full bg-yellow-400" />
               Risk Management
             </div>
-            <div className="bg-poly-dark/50 rounded-xl p-4 space-y-1 divide-y divide-white/5">
+            <div className="inset-tile p-4 space-y-1 divide-y divide-white/5">
               <ConfigItem label="Daily Max Loss" value={`${config.risk?.dailyMaxLossPct ?? 10}%`} />
               <ConfigItem label="Max Consecutive Losses" value={config.risk?.maxConsecutiveLosses ?? 6} type="number" />
               <ConfigItem label="Pause Duration" value={`${config.risk?.pauseOnBreachMinutes ?? 30}m`} />
@@ -113,7 +107,7 @@ export function ConfigPanel({ config }: ConfigPanelProps) {
               <span className="w-1.5 h-1.5 rounded-full bg-green-400" />
               Integrations
             </div>
-            <div className="bg-poly-dark/50 rounded-xl p-4 space-y-1 divide-y divide-white/5">
+            <div className="inset-tile p-4 space-y-1 divide-y divide-white/5">
               <ConfigItem label="Binance K-lines" value={config.binance?.enabled ?? false} type="boolean" />
               <div className="flex items-center justify-between py-2">
                 <span className="text-gray-400 text-sm">Network</span>

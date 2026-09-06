@@ -90,9 +90,9 @@ export function DipArbPanel({ state }: DipArbPanelProps) {
   };
 
   const getSumStatus = (sum: number) => {
-    if (sum <= 0.92) return { color: 'text-green-400', bg: 'bg-green-500', label: '🎯 Opportunity!' };
-    if (sum <= 0.98) return { color: 'text-yellow-400', bg: 'bg-yellow-500', label: 'Close' };
-    return { color: 'text-gray-400', bg: 'bg-gray-500', label: 'Normal' };
+    if (sum <= 0.92) return { color: 'text-green-400', bg: 'bg-green-500', label: 'OPPORTUNITY' };
+    if (sum <= 0.98) return { color: 'text-yellow-400', bg: 'bg-yellow-500', label: 'CLOSE' };
+    return { color: 'text-gray-400', bg: 'bg-gray-500', label: 'NORMAL' };
   };
 
   const sumStatus = getSumStatus(dipArb?.sum ?? 1);
@@ -101,9 +101,6 @@ export function DipArbPanel({ state }: DipArbPanelProps) {
     <div className="panel h-full">
       <div className="panel-header">
         <h2 className="section-header mb-0">
-          <div className="section-header-icon bg-gradient-to-br from-green-500/20 to-emerald-500/20">
-            📉
-          </div>
           <div className="flex flex-col">
             <span className="text-[10px] text-green-400 uppercase tracking-wider font-medium">Strategy 3</span>
             <span>DipArb Monitor</span>
@@ -124,7 +121,7 @@ export function DipArbPanel({ state }: DipArbPanelProps) {
         {/* Market Info */}
         {(dipArb?.status === 'active' || dipArb?.marketName) ? (
           <>
-            <div className="bg-poly-dark/50 rounded-xl p-4">
+            <div className="inset-tile p-4">
               <div className="text-sm text-white font-medium mb-2 truncate" title={dipArb.marketName || ''}>
                 {dipArb.marketName}
               </div>
@@ -145,7 +142,7 @@ export function DipArbPanel({ state }: DipArbPanelProps) {
                   <span className="text-gray-500">Time Remaining</span>
                   <span className="text-yellow-400 font-mono font-bold">{timeRemaining}</span>
                 </div>
-                <div className="h-1.5 rounded-full bg-gray-700 overflow-hidden">
+                <div className="h-1.5 rounded-full bg-[#16161f] overflow-hidden">
                   <div
                     className="h-full rounded-full progress-gradient-yellow transition-all duration-1000"
                     style={{ width: `${progress}%` }}
@@ -155,7 +152,7 @@ export function DipArbPanel({ state }: DipArbPanelProps) {
             </div>
 
             {/* Live Prices */}
-            <div className="bg-poly-dark/50 rounded-xl p-4">
+            <div className="inset-tile p-4">
               <div className="text-xs text-gray-500 uppercase tracking-wider mb-4">Live Orderbook</div>
               <div className="grid grid-cols-3 gap-4">
                 <div className="text-center">
@@ -203,7 +200,7 @@ export function DipArbPanel({ state }: DipArbPanelProps) {
                   <span className="text-gray-500">Target: ≤0.92</span>
                   <span className={sumStatus.color}>{sumStatus.label}</span>
                 </div>
-                <div className="h-2.5 bg-gray-700 rounded-full overflow-hidden relative">
+                <div className="h-2.5 bg-[#16161f] rounded-full overflow-hidden relative">
                   {/* Target marker */}
                   <div
                     className="absolute top-0 bottom-0 w-0.5 bg-white/50 z-10"
@@ -223,8 +220,7 @@ export function DipArbPanel({ state }: DipArbPanelProps) {
             </div>
           </>
         ) : (
-          <div className="bg-poly-dark/50 rounded-xl p-8 text-center">
-            <div className="text-4xl mb-3">🔍</div>
+          <div className="inset-tile p-8 text-center">
             <div className="text-gray-400">No active market</div>
             <div className="text-xs text-gray-500 mt-1">Waiting for next rotation...</div>
           </div>
@@ -238,7 +234,7 @@ export function DipArbPanel({ state }: DipArbPanelProps) {
           </div>
           <div className="space-y-2 max-h-36 overflow-y-auto">
             {(dipArb?.signals ?? []).length === 0 ? (
-              <div className="text-gray-500 text-sm text-center py-4 bg-poly-dark/30 rounded-lg">
+              <div className="text-gray-500 text-sm text-center py-4 inset-tile">
                 Waiting for signals...
               </div>
             ) : (
