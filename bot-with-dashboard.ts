@@ -85,8 +85,12 @@ const CONFIG = {
     // signal is refused.
     maxTotalExposurePct: parseFloat(process.env.MAX_TOTAL_EXPOSURE_PCT || '0.30'),
     minOrderUsd: 1,   // Polymarket minimum order value
+    // Per-strategy caps, each independent of the others: they need not sum to
+    // 1, and maxTotalExposurePct still binds across all of them. Smart Money
+    // is the only strategy producing trades, and at 0.60 its own allocation
+    // froze a run at $30 while the global ceiling sat at $40.
     strategyAllocation: {
-      smartMoney: 0.60,
+      smartMoney: 0.90,
       arbitrage: 0.20,
       dipArb: 0.10,
       direct: 0.10,
