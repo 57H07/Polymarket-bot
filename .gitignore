@@ -5,9 +5,9 @@ node_modules/
 dist/
 
 # Environment variables
-.env
-.env.local
-.env.*.local
+# Tout fichier .env* est secret, sauf le modele versionne.
+.env*
+!.env.example
 
 # IDE
 .idea/
