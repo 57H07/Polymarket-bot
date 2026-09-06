@@ -1,4 +1,5 @@
 import type { BotState } from '../types';
+import { amount, usd } from '../format';
 
 interface SmartMoneyPanelProps {
   state: BotState | null;
@@ -100,11 +101,14 @@ export function SmartMoneyPanel({ state }: SmartMoneyPanelProps) {
                     {signal.market.length > 25 ? signal.market.slice(0, 25) + '...' : signal.market}
                   </span>
                   <div className="text-right">
+                    {/* `size` is a share count, not dollars. It used to carry a
+                        `$` and the browser's locale, so 12.785 shares rendered
+                        as "$12,785". The dollar figure is size x price. */}
                     <div className="text-white font-mono font-medium">
-                      ${signal.size.toLocaleString()}
+                      {usd(signal.size * signal.price)}
                     </div>
                     <div className="text-xs text-gray-500">
-                      @{signal.price.toFixed(2)}
+                      {amount(signal.size)} sh @ {signal.price.toFixed(2)}
                     </div>
                   </div>
                 </div>

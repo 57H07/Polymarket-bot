@@ -231,6 +231,11 @@ const state: BotState = {
   merges: 0,
   redeems: 0,
   swaps: 0,
+  wins: 0,
+  losses: 0,
+  closedTrades: 0,
+  walletAddress: null,
+  chain: { blockNumber: null, gasPriceGwei: null, updatedAt: null },
   usdcBalance: 0,
   usdcEBalance: 0,
   maticBalance: 0,
@@ -413,6 +418,11 @@ function recordTrade(profit: number, strategy: Strategy, details?: Partial<Trade
       txHash: details.txHash,
     });
   }
+
+  // Only an exit carries a realised profit; an entry is neither a win nor a
+  // loss, so it must stay out of both columns and out of the denominator.
+  if (profit > 0) { state.wins++; state.closedTrades++; }
+  else if (profit < 0) { state.losses++; state.closedTrades++; }
 
   syncRiskToState();
   persistRisk();
@@ -1333,12 +1343,47 @@ async function updateBalances() {
   } catch { /* silent on interval */ }
 }
 
+/**
+ * Polygon JSON-RPC endpoint. The long-standing default, polygon-rpc.com, now
+ * answers 403 "tenant disabled" — which also silently broke the live-mode
+ * balance monitor, since its errors are swallowed on an interval.
+ */
+const POLYGON_RPC_URL = process.env.POLYGON_RPC_URL || 'https://polygon-bor-rpc.publicnode.com';
+
+/**
+ * Polygon block height and gas price for the dashboard's network strip. Runs in
+ * both modes and needs no key: it is a read-only RPC. On failure the fields
+ * stay null so the UI can say "unavailable" instead of inventing a number.
+ */
+async function pollChainTelemetry(provider: ethers.providers.JsonRpcProvider) {
+  try {
+    const [block, gas] = await Promise.all([provider.getBlockNumber(), provider.getGasPrice()]);
+    state.chain = {
+      blockNumber: block,
+      gasPriceGwei: Number(ethers.utils.formatUnits(gas, 'gwei')),
+      updatedAt: Date.now(),
+    };
+  } catch (err) {
+    if (state.chain.blockNumber !== null || state.chain.updatedAt === null) {
+      log('WARN', `Polygon RPC unreachable (${POLYGON_RPC_URL}): ${(err as Error).message}`);
+    }
+    state.chain = { blockNumber: null, gasPriceGwei: null, updatedAt: Date.now() };
+  }
+  updateDashboard();
+}
+
+function setupChainTelemetry() {
+  const provider = new ethers.providers.JsonRpcProvider(POLYGON_RPC_URL);
+  void pollChainTelemetry(provider);
+  setInterval(() => { void pollChainTelemetry(provider); }, 30_000);
+}
+
 async function setupSwap() {
   if (paper) return;
   log('SWAP', 'Setting up Wallet & Balance Monitor...');
   try {
     if (!SIGNING_KEY) return;
-    const provider = new ethers.providers.JsonRpcProvider('https://polygon-rpc.com');
+    const provider = new ethers.providers.JsonRpcProvider(POLYGON_RPC_URL);
     const signer = new ethers.Wallet(SIGNING_KEY, provider);
     swapService = new SwapService(signer);
     await updateBalances();
@@ -1361,7 +1406,7 @@ async function setupOnchain() {
   log('CHAIN', 'Checking on-chain approvals...');
   try {
     if (!SIGNING_KEY) return;
-    const onchain = new OnchainService({ privateKey: SIGNING_KEY, rpcUrl: 'https://polygon-rpc.com' });
+    const onchain = new OnchainService({ privateKey: SIGNING_KEY, rpcUrl: POLYGON_RPC_URL });
     if (CONFIG.onchain.autoApprove) {
       log('CHAIN', 'Auto-approving Exchange contracts (unlimited USDC.e allowance + CTF operator)...');
       const result = await onchain.approveAll();
@@ -1402,7 +1447,9 @@ async function syncPortfolio() {
           avgPrice: p.avgCost,
           curPrice: cur,
           cashPnl: (cur - p.avgCost) * p.shares,
-          percentPnl: p.avgCost > 0 ? ((cur - p.avgCost) / p.avgCost) * 100 : 0,
+          // A fraction, matching what the Data API returns on the live path;
+          // the dashboard is what turns it into a percentage.
+          percentPnl: p.avgCost > 0 ? (cur - p.avgCost) / p.avgCost : 0,
           title: p.title || p.conditionId,
           slug: p.strategy,
           marketClosed: false,
@@ -1624,10 +1671,14 @@ async function main() {
     sdk = new PolymarketSDK({ privateKey: SIGNING_KEY ?? undefined });
     sdk.connect();
     try { await sdk.waitForConnection(15000); } catch (err) { log('WARN', `Realtime WebSocket not connected yet: ${(err as Error).message}`); }
-    if (SIGNING_KEY) log('INFO', `Wallet: ${sdk.tradingService.getAddress()} (not used in simulation)`);
+    if (SIGNING_KEY) {
+      state.walletAddress = sdk.tradingService.getAddress();
+      log('INFO', `Wallet: ${state.walletAddress} (not used in simulation)`);
+    }
   } else {
     sdk = await PolymarketSDK.create({ privateKey: SIGNING_KEY! });
-    log('INFO', `Wallet: ${sdk.tradingService.getAddress()}`);
+    state.walletAddress = sdk.tradingService.getAddress();
+    log('INFO', `Wallet: ${state.walletAddress}`);
   }
   readOnlyCtf = new CTFClient({ privateKey: '0x' + '1'.repeat(64) });
 
@@ -1645,6 +1696,7 @@ async function main() {
 
   await setupOnchain();           // live only: approvals first
   await setupSwap();              // live only: balances
+  setupChainTelemetry();          // both modes: read-only block/gas for the UI
   await setupBinanceAnalysis();
   await setupArbitrage();
   await setupDipArb();

@@ -132,7 +132,7 @@ function App() {
               <StrategyControls config={config} onToggle={handleToggleStrategy} />
               <TrendIndicators state={state} />
               <StrategyGrid state={state} config={config} />
-              <OnChainStats state={state} />
+              <OnChainStats state={state} config={config} />
             </div>
           </div>
 

@@ -42,11 +42,15 @@ export function Header({ state, config, connected, onHistoryClick, onPositionsCl
   const isPaused = state?.isPaused ?? false;
   const isDryRun = config?.dryRun ?? true;
 
-  // Mock wallet address (in real app, this would come from config/state)
-  const walletAddress = '0xaF98e0638671abD5140Ad981Ff4c01869F3410de';
-  const shortWallet = `${walletAddress.slice(0, 6)}…${walletAddress.slice(-4)}`;
+  // The bot's actual signing wallet. This used to be a hardcoded address
+  // belonging to nobody in this setup, with a copy button next to it.
+  const walletAddress = state?.walletAddress ?? null;
+  const shortWallet = walletAddress
+    ? `${walletAddress.slice(0, 6)}…${walletAddress.slice(-4)}`
+    : 'no wallet';
 
   const copyWallet = async () => {
+    if (!walletAddress) return;
     await navigator.clipboard.writeText(walletAddress);
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
@@ -116,7 +120,7 @@ export function Header({ state, config, connected, onHistoryClick, onPositionsCl
 
       {/* Network telemetry */}
       <div className="hidden 2xl:block">
-        <NetworkStatus connected={connected} />
+        <NetworkStatus connected={connected} state={state} />
       </div>
 
       {/* Runtime + wallet + actions */}
@@ -128,15 +132,16 @@ export function Header({ state, config, connected, onHistoryClick, onPositionsCl
 
         <button
           onClick={copyWallet}
-          title="Copy wallet address"
-          className="inline-flex items-center gap-2.5 rounded-control border border-[#1e1e2a] bg-[#0d0d15] px-3.5 py-2.5 font-mono text-xs text-gray-400 transition-colors hover:border-[#2b2b3c] hover:text-white"
+          disabled={!walletAddress}
+          title={walletAddress ? `Copy ${walletAddress}` : 'No signing key configured'}
+          className="inline-flex items-center gap-2.5 rounded-control border border-[#1e1e2a] bg-[#0d0d15] px-3.5 py-2.5 font-mono text-xs text-gray-400 transition-colors hover:border-[#2b2b3c] hover:text-white disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:border-[#1e1e2a] disabled:hover:text-gray-400"
         >
           <span
             className="h-[18px] w-[18px] rounded-full"
             style={{ background: 'linear-gradient(140deg, #9b8cff, #4b3ba8)' }}
           />
           {shortWallet}
-          <span className="text-gray-500">{copied ? '✓' : '⧉'}</span>
+          {walletAddress && <span className="text-gray-500">{copied ? '✓' : '⧉'}</span>}
         </button>
 
         <button onClick={onHistoryClick} className="btn btn-secondary">

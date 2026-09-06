@@ -5,15 +5,16 @@ interface SessionSummaryProps {
 }
 
 export function SessionSummary({ state }: SessionSummaryProps) {
-  const trades = state?.tradesExecuted ?? 0;
   const totalPnL = state?.totalPnL ?? 0;
-  const avgProfit = trades > 0 ? totalPnL / trades : 0;
-  
-  // Calculate estimated wins/losses based on P&L
-  const estimatedWins = trades > 0 ? Math.round(trades * 0.5 + (totalPnL > 0 ? totalPnL / 10 : totalPnL / 20)) : 0;
-  const wins = Math.max(0, Math.min(trades, estimatedWins));
-  const losses = Math.max(0, trades - wins);
-  const winRate = trades > 0 ? (wins / trades) * 100 : 0;
+
+  // Wins and losses are counted from realised exits only. A position that is
+  // still open has no outcome yet: counting it would turn every entry into
+  // half a win, which is what this panel used to do.
+  const wins = state?.wins ?? 0;
+  const losses = state?.losses ?? 0;
+  const closed = state?.closedTrades ?? 0;
+  const winRate = closed > 0 ? (wins / closed) * 100 : 0;
+  const avgProfit = closed > 0 ? totalPnL / closed : 0;
 
   const arbProfit = state?.arbProfit ?? 0;
   const smartMoneyTrades = state?.smartMoneyTrades ?? 0;
@@ -43,14 +44,14 @@ export function SessionSummary({ state }: SessionSummaryProps) {
             <div className="text-xs text-gray-500 uppercase tracking-wider mt-1">Losses</div>
           </div>
           <div className="text-center">
-            <div className={`metric-value text-[clamp(17px,1.5vw,26px)] ${winRate >= 50 ? 'text-green-400' : 'text-red-400'}`}>
-              {winRate.toFixed(0)}%
+            <div className={`metric-value text-[clamp(17px,1.5vw,26px)] ${closed === 0 ? 'text-gray-500' : winRate >= 50 ? 'text-green-400' : 'text-red-400'}`}>
+              {closed > 0 ? `${winRate.toFixed(0)}%` : '--'}
             </div>
             <div className="text-xs text-gray-500 uppercase tracking-wider mt-1">Win Rate</div>
           </div>
           <div className="text-center">
-            <div className={`metric-value text-[clamp(17px,1.5vw,26px)] ${avgProfit >= 0 ? 'text-green-400' : 'text-red-400'}`}>
-              ${avgProfit.toFixed(2)}
+            <div className={`metric-value text-[clamp(17px,1.5vw,26px)] ${closed === 0 ? 'text-gray-500' : avgProfit >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+              {closed > 0 ? `$${avgProfit.toFixed(2)}` : '--'}
             </div>
             <div className="text-xs text-gray-500 uppercase tracking-wider mt-1">Avg/Trade</div>
           </div>
@@ -59,17 +60,17 @@ export function SessionSummary({ state }: SessionSummaryProps) {
         {/* Win Rate Bar */}
         <div className="mb-6">
           <div className="flex justify-between text-xs text-gray-500 mb-2">
-            <span>Win Rate Distribution</span>
+            <span>{closed > 0 ? 'Win Rate Distribution' : 'No closed trades yet'}</span>
             <span>{wins}W - {losses}L</span>
           </div>
           <div className="h-3 rounded-full bg-[#16161f] overflow-hidden flex">
             <div 
               className="h-full progress-gradient-green transition-all duration-500"
-              style={{ width: `${winRate}%` }}
+              style={{ width: closed > 0 ? `${winRate}%` : '0%' }}
             />
             <div 
               className="h-full progress-gradient-red transition-all duration-500"
-              style={{ width: `${100 - winRate}%` }}
+              style={{ width: closed > 0 ? `${100 - winRate}%` : '0%' }}
             />
           </div>
         </div>

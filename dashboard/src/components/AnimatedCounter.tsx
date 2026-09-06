@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import { num } from '../format';
 
 interface AnimatedCounterProps {
     value: number;
@@ -54,10 +55,7 @@ export function AnimatedCounter({
         };
     }, [value, duration]);
 
-    const formattedValue = Math.abs(displayValue).toLocaleString(undefined, {
-        minimumFractionDigits: decimals,
-        maximumFractionDigits: decimals,
-    });
+    const formattedValue = num(Math.abs(displayValue), decimals);
 
     const sign = displayValue >= 0 ? '+' : '-';
     const displayPrefix = colorize ? sign : prefix;

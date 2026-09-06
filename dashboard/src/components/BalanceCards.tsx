@@ -1,4 +1,5 @@
 import type { BotState } from '../types';
+import { num } from '../format';
 
 interface BalanceCardsProps {
   state: BotState | null;
@@ -44,12 +45,7 @@ export function BalanceCards({ state }: BalanceCardsProps) {
   const usdce = state?.usdcEBalance ?? 0;
   const total = usdc + usdce;
 
-  const formatCurrency = (value: number, decimals: number = 2) => {
-    return value.toLocaleString(undefined, {
-      minimumFractionDigits: decimals,
-      maximumFractionDigits: decimals,
-    });
-  };
+  const formatCurrency = (value: number, decimals: number = 2) => num(value, decimals);
 
   if (state?.paper) {
     const p = state.paper;

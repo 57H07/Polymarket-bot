@@ -44,6 +44,22 @@ export interface BotState {
   merges: number;
   redeems: number;
   swaps: number;
+
+  // Closed-trade record. An entry that has not been exited yet has no realised
+  // profit, so it belongs in neither column and not in the denominator.
+  wins: number;
+  losses: number;
+  closedTrades: number;
+
+  /** Signing wallet, or null when the bot runs without a key. */
+  walletAddress: string | null;
+
+  /** Polygon telemetry; null fields mean the RPC is unreachable. */
+  chain: {
+    blockNumber: number | null;
+    gasPriceGwei: number | null;
+    updatedAt: number | null;
+  };
   usdcBalance: number;
   usdcEBalance: number;
   maticBalance: number;

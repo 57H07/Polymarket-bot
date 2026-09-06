@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import type { BotState, BotConfig } from '../types';
 import { KpiCard } from './KpiCard';
+import { signedUsd } from '../format';
 
 interface QuickStatsProps {
   state: BotState | null;
@@ -52,7 +53,11 @@ export function QuickStats({ state, config }: QuickStatsProps) {
     config?.directTrading?.enabled,
   ].filter(Boolean).length;
 
-  const winRate = trades > 0 ? Math.min(100, Math.max(0, 50 + (realizedPnL / (trades * 2)))) : 0;
+  // Realised exits only: the same numbers the Session Summary panel shows, so
+  // the two cannot disagree. Before this they were two different formulas.
+  const wins = state?.wins ?? 0;
+  const closed = state?.closedTrades ?? 0;
+  const winRate = closed > 0 ? (wins / closed) * 100 : 0;
 
   const totalSeries = useSeries(totalPnL);
   const dailySeries = useSeries(dailyPnL);
@@ -65,13 +70,7 @@ export function QuickStats({ state, config }: QuickStatsProps) {
   const tradeFlash = useFlash(trades);
   const foundFlash = useFlash(opportunities);
 
-  const formatPnL = (value: number) => {
-    const formatted = Math.abs(value).toLocaleString(undefined, {
-      minimumFractionDigits: 2,
-      maximumFractionDigits: 2,
-    });
-    return value >= 0 ? `+$${formatted}` : `-$${formatted}`;
-  };
+  const formatPnL = (value: number) => signedUsd(value);
 
   const openLabel =
     unrealizedPnL !== 0
@@ -97,7 +96,7 @@ export function QuickStats({ state, config }: QuickStatsProps) {
         value={formatPnL(dailyPnL)}
         tone={dailyPnL >= 0 ? 'gain' : 'loss'}
         delta={dailyPnL >= 0 ? 'up' : 'down'}
-        sub="session"
+        sub="realised today"
         spark={dailySeries}
         highlight={dailyFlash}
         delay={0.12}
@@ -105,10 +104,10 @@ export function QuickStats({ state, config }: QuickStatsProps) {
 
       <KpiCard
         label="Win Rate"
-        value={`${winRate.toFixed(0)}%`}
+        value={closed > 0 ? `${winRate.toFixed(0)}%` : '--'}
         tone="accent"
-        delta={`${trades} trades`}
-        sub="estimated"
+        delta={`${closed} closed`}
+        sub={closed > 0 ? `${wins}W / ${closed - wins}L` : 'nothing exited yet'}
         arrow="◆"
         spark={winSeries}
         delay={0.19}
