@@ -1261,12 +1261,20 @@ export class RealtimeServiceV2 extends EventEmitter {
    * - If spread > 0.10: use last trade price
    */
   private calculateDerivedPrice(assetId: string, book: OrderbookSnapshot): PriceUpdate | null {
-    if (book.bids.length === 0 || book.asks.length === 0) {
+    // A book with neither side carries no information at all.
+    if (book.bids.length === 0 && book.asks.length === 0) {
       return null;
     }
 
-    const bestBid = book.bids[0].price;
-    const bestAsk = book.asks[0].price;
+    // Outcome shares are bounded to [0, 1], so an empty side of the book is
+    // the bound itself: with no asks nobody sells below 1, with no bids
+    // nobody buys above 0. Polymarket quotes near-settled markets exactly
+    // this way - a book of bid 0.9990 with no asks is quoted 0.9995, i.e.
+    // (0.9990 + 1) / 2, and no bids with ask 0.0010 is quoted 0.0005.
+    // Returning null here instead (the previous behaviour) left every
+    // near-resolved market with no price at all.
+    const bestBid = book.bids[0]?.price ?? 0;
+    const bestAsk = book.asks[0]?.price ?? 1;
     const spread = bestAsk - bestBid;
     const midpoint = (bestBid + bestAsk) / 2;
 
