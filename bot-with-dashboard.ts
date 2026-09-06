@@ -80,7 +80,10 @@ const CONFIG = {
     totalUsd: parseFloat(process.env.CAPITAL_USD || '250'),
     maxPerTradePct: 0.02,
     maxPerMarketPct: 0.10,
-    maxTotalExposurePct: 0.30,
+    // Raise this to measure the strategies rather than the ceiling: at 0.30 of
+    // a $50 book with $1 orders, the cap binds within minutes and every later
+    // signal is refused.
+    maxTotalExposurePct: parseFloat(process.env.MAX_TOTAL_EXPOSURE_PCT || '0.30'),
     minOrderUsd: 1,   // Polymarket minimum order value
     strategyAllocation: {
       smartMoney: 0.60,
