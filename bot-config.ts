@@ -34,6 +34,13 @@ import {
   type SmartMoneyLeaderboardEntry,
   type BinanceKLine,
 } from './src/index.js';
+import { normalizePrivateKey, isValidPrivateKey, describePrivateKeyProblem } from './src/utils/private-key.js';
+
+/** Signing key resolved once; `null` when unset, a placeholder, or malformed. */
+const KEY_PROBLEM = describePrivateKeyProblem(process.env.POLYMARKET_PRIVATE_KEY);
+const SIGNING_KEY = isValidPrivateKey(process.env.POLYMARKET_PRIVATE_KEY)
+  ? normalizePrivateKey(process.env.POLYMARKET_PRIVATE_KEY)!
+  : null;
 
 // ============================================================================
 // CONFIGURATION
@@ -507,7 +514,7 @@ async function setupArbitrage(sdk: PolymarketSDK) {
   log('ARB', 'Setting up ArbitrageService...');
 
   arbService = new ArbitrageService({
-    privateKey: CONFIG.dryRun ? undefined : process.env.POLYMARKET_PRIVATE_KEY,
+    privateKey: CONFIG.dryRun ? undefined : SIGNING_KEY ?? undefined,
     profitThreshold: CONFIG.arbitrage.profitThreshold,
     minTradeSize: CONFIG.arbitrage.minTradeSize,
     maxTradeSize: CONFIG.arbitrage.maxTradeSize,
@@ -597,7 +604,7 @@ async function setupOnchain() {
 
   try {
     onchainService = new OnchainService({
-      privateKey: process.env.POLYMARKET_PRIVATE_KEY!,
+      privateKey: SIGNING_KEY!,
     });
 
     const status = await onchainService.checkReadyForCTF('10');
@@ -873,8 +880,8 @@ async function main() {
   console.log('║  All Features: Smart Money | Arb | DipArb | OnChain | Binance      ║');
   console.log('╚════════════════════════════════════════════════════════════════════╝\n');
 
-  if (!process.env.POLYMARKET_PRIVATE_KEY) {
-    log('ERROR', 'POLYMARKET_PRIVATE_KEY not found');
+  if (!SIGNING_KEY) {
+    log('ERROR', KEY_PROBLEM!);
     process.exit(1);
   }
 
@@ -892,7 +899,7 @@ async function main() {
   });
 
   const sdk = await PolymarketSDK.create({
-    privateKey: process.env.POLYMARKET_PRIVATE_KEY,
+    privateKey: SIGNING_KEY,
   });
 
   log('INFO', `Wallet: ${sdk.tradingService.getAddress()}`);

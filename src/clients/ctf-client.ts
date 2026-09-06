@@ -24,6 +24,7 @@
  */
 
 import { ethers, Contract, Wallet, BigNumber } from 'ethers';
+import { assertPrivateKey } from '../utils/private-key.js';
 
 // ===== Contract Addresses (Polygon Mainnet) =====
 
@@ -193,7 +194,7 @@ export class CTFClient {
   constructor(config: CTFConfig) {
     const rpcUrl = config.rpcUrl || 'https://polygon-rpc.com';
     this.provider = new ethers.providers.JsonRpcProvider(rpcUrl);
-    this.wallet = new Wallet(config.privateKey, this.provider);
+    this.wallet = new Wallet(assertPrivateKey(config.privateKey), this.provider);
     this.ctfContract = new Contract(CTF_CONTRACT, CTF_ABI, this.wallet);
     this.usdcContract = new Contract(USDC_CONTRACT, ERC20_ABI, this.wallet);
     this.gasPriceMultiplier = config.gasPriceMultiplier || 1.2;

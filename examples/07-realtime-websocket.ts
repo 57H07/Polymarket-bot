@@ -31,8 +31,10 @@ async function main() {
   // 2. Get market details for token IDs
   console.log('2. Getting market details...');
   const unifiedMarket = await sdk.markets.getMarket(market.conditionId);
-  const yesToken = unifiedMarket.tokens.find(t => t.outcome === 'Yes');
-  const noToken = unifiedMarket.tokens.find(t => t.outcome === 'No');
+  // Most markets are Yes/No, but many (sports, elections) name their outcomes
+  // after the contenders - fall back to the two sides of the binary market.
+  const yesToken = unifiedMarket.tokens.find(t => t.outcome === 'Yes') ?? unifiedMarket.tokens[0];
+  const noToken = unifiedMarket.tokens.find(t => t.outcome === 'No') ?? unifiedMarket.tokens[1];
   const yesTokenId = yesToken?.tokenId || '';
   const noTokenId = noToken?.tokenId || '';
   console.log(`   YES Token: ${yesTokenId.slice(0, 20)}...`);

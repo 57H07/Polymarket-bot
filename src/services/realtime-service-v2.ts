@@ -21,6 +21,7 @@ import {
   ConnectionStatus,
 } from '@polymarket/real-time-data-client';
 import type { PriceUpdate, BookUpdate, Orderbook, OrderbookLevel } from '../core/types.js';
+import { ClobSocket, type ClobMarketEvent } from './clob-socket.js';
 
 // ============================================================================
 // Types
@@ -254,6 +255,14 @@ export interface EquityPriceHandlers {
 
 export class RealtimeServiceV2 extends EventEmitter {
   private client: RealTimeDataClient | null = null;
+  /**
+   * Market data no longer travels over the RTDS socket: Polymarket rejects
+   * `clob_market` subscriptions there with a 400. Orderbook/price/trade data
+   * comes from this dedicated CLOB socket instead. See ClobSocket.
+   */
+  private clobSocket: ClobSocket | null = null;
+  /** Per-subscription CLOB error listeners, so unsubscribe() can detach them. */
+  private clobErrorHandlers: Map<string, (err: Error) => void> = new Map();
   private config: RealtimeServiceConfig;
   private subscriptions: Map<string, Subscription> = new Map();
   private subscriptionIdCounter = 0;
@@ -313,6 +322,25 @@ export class RealtimeServiceV2 extends EventEmitter {
     return this;
   }
 
+  /** Lazily create the CLOB market socket and route its events into the existing handlers. */
+  private ensureClobSocket(): ClobSocket {
+    if (this.clobSocket) return this.clobSocket;
+
+    const socket = new ClobSocket({ debug: this.config.debug });
+    socket.on('event', (event: ClobMarketEvent) => {
+      this.handleMarketMessage(event.type, event.payload, event.timestamp);
+    });
+    socket.on('error', (err: Error) => {
+      this.log(`CLOB socket error: ${err.message}`);
+      this.emit('error', err);
+    });
+    socket.on('connected', () => this.emit('clobConnected'));
+    socket.on('disconnected', (code: number) => this.emit('clobDisconnected', code));
+
+    this.clobSocket = socket;
+    return socket;
+  }
+
   private scheduleReconnect(): void {
     if (!this.config.autoReconnect || this.manualDisconnect || !this.client || this.reconnectTimer) return;
     const delay = this.reconnectDelayMs;
@@ -338,6 +366,11 @@ export class RealtimeServiceV2 extends EventEmitter {
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
+    }
+    if (this.clobSocket) {
+      this.clobSocket.disconnect();
+      this.clobSocket.removeAllListeners();
+      this.clobSocket = null;
     }
     if (this.client) {
       this.client.disconnect();
@@ -366,19 +399,18 @@ export class RealtimeServiceV2 extends EventEmitter {
    */
   subscribeMarkets(tokenIds: string[], handlers: MarketDataHandlers = {}): MarketSubscription {
     const subId = `market_${++this.subscriptionIdCounter}`;
-    const filterStr = JSON.stringify(tokenIds);
 
-    // Subscribe to all market data types
-    const subscriptions = [
-      { topic: 'clob_market', type: 'agg_orderbook', filters: filterStr },
-      { topic: 'clob_market', type: 'price_change', filters: filterStr },
-      { topic: 'clob_market', type: 'last_trade_price', filters: filterStr },
-      { topic: 'clob_market', type: 'tick_size_change', filters: filterStr },
-    ];
+    // Market data comes from the dedicated CLOB socket, not the RTDS client:
+    // ws-live-data rejects clob_market subscriptions with a 400. The CLOB
+    // socket handles its own reconnection and re-subscription.
+    const clob = this.ensureClobSocket();
+    clob.addAssets(tokenIds);
 
-    const subMsg = { subscriptions };
-    this.sendSubscription(subMsg);
-    this.subscriptionMessages.set(subId, subMsg);  // Store for reconnection
+    if (handlers.onError) {
+      const errorHandler = (err: Error) => handlers.onError?.(err);
+      clob.on('error', errorHandler);
+      this.clobErrorHandlers.set(subId, errorHandler);
+    }
 
     // Register handlers
     const orderbookHandler = (book: OrderbookSnapshot) => {
@@ -420,9 +452,14 @@ export class RealtimeServiceV2 extends EventEmitter {
         this.off('priceChange', priceChangeHandler);
         this.off('lastTrade', lastTradeHandler);
         this.off('tickSizeChange', tickSizeHandler);
-        this.sendUnsubscription({ subscriptions });
+        const errorHandler = this.clobErrorHandlers.get(subId);
+        if (errorHandler) {
+          this.clobSocket?.off('error', errorHandler);
+          this.clobErrorHandlers.delete(subId);
+        }
+        this.clobSocket?.removeAssets(tokenIds);
         this.subscriptions.delete(subId);
-        this.subscriptionMessages.delete(subId);  // Remove from reconnection list
+        this.subscriptionMessages.delete(subId);
       },
     };
 
@@ -519,32 +556,12 @@ export class RealtimeServiceV2 extends EventEmitter {
   /**
    * Subscribe to market lifecycle events (creation, resolution)
    */
-  subscribeMarketEvents(handlers: { onMarketEvent?: (event: MarketEvent) => void }): Subscription {
-    const subId = `market_event_${++this.subscriptionIdCounter}`;
-
-    const subscriptions = [
-      { topic: 'clob_market', type: 'market_created' },
-      { topic: 'clob_market', type: 'market_resolved' },
-    ];
-
-    this.sendSubscription({ subscriptions });
-
-    const handler = (event: MarketEvent) => handlers.onMarketEvent?.(event);
-    this.on('marketEvent', handler);
-
-    const subscription: Subscription = {
-      id: subId,
-      topic: 'clob_market',
-      type: 'lifecycle',
-      unsubscribe: () => {
-        this.off('marketEvent', handler);
-        this.sendUnsubscription({ subscriptions });
-        this.subscriptions.delete(subId);
-      },
-    };
-
-    this.subscriptions.set(subId, subscription);
-    return subscription;
+  subscribeMarketEvents(_handlers: { onMarketEvent?: (event: MarketEvent) => void }): Subscription {
+    throw new Error(
+      'subscribeMarketEvents is unavailable: Polymarket removed the clob_market lifecycle topics ' +
+      'from the realtime data service, and the CLOB market channel does not carry them. ' +
+      'Poll the Gamma API for market creation/resolution instead.'
+    );
   }
 
   // ============================================================================
@@ -556,35 +573,12 @@ export class RealtimeServiceV2 extends EventEmitter {
    * @param credentials - CLOB API credentials
    * @param handlers - Event handlers
    */
-  subscribeUserEvents(credentials: ClobApiKeyCreds, handlers: UserDataHandlers = {}): Subscription {
-    const subId = `user_${++this.subscriptionIdCounter}`;
-
-    const subscriptions = [
-      { topic: 'clob_user', type: '*', clob_auth: credentials },
-    ];
-
-    this.sendSubscription({ subscriptions });
-
-    const orderHandler = (order: UserOrder) => handlers.onOrder?.(order);
-    const tradeHandler = (trade: UserTrade) => handlers.onTrade?.(trade);
-
-    this.on('userOrder', orderHandler);
-    this.on('userTrade', tradeHandler);
-
-    const subscription: Subscription = {
-      id: subId,
-      topic: 'clob_user',
-      type: '*',
-      unsubscribe: () => {
-        this.off('userOrder', orderHandler);
-        this.off('userTrade', tradeHandler);
-        this.sendUnsubscription({ subscriptions });
-        this.subscriptions.delete(subId);
-      },
-    };
-
-    this.subscriptions.set(subId, subscription);
-    return subscription;
+  subscribeUserEvents(_credentials: ClobApiKeyCreds, _handlers: UserDataHandlers = {}): Subscription {
+    throw new Error(
+      'subscribeUserEvents is unavailable: Polymarket removed the clob_user topic from the ' +
+      'realtime data service. User order/trade streaming now requires the authenticated CLOB ' +
+      'socket at wss://ws-subscriptions-clob.polymarket.com/ws/user, which is not yet implemented.'
+    );
   }
 
   // ============================================================================
@@ -621,6 +615,7 @@ export class RealtimeServiceV2 extends EventEmitter {
         ];
 
     this.sendSubscription({ subscriptions });
+    this.subscriptionMessages.set(subId, { subscriptions });  // Replay on reconnect
 
     const handler = (trade: ActivityTrade) => handlers.onTrade?.(trade);
     this.on('activityTrade', handler);
@@ -633,6 +628,7 @@ export class RealtimeServiceV2 extends EventEmitter {
         this.off('activityTrade', handler);
         this.sendUnsubscription({ subscriptions });
         this.subscriptions.delete(subId);
+        this.subscriptionMessages.delete(subId);
       },
     };
 
@@ -669,6 +665,7 @@ export class RealtimeServiceV2 extends EventEmitter {
     }));
 
     this.sendSubscription({ subscriptions });
+    this.subscriptionMessages.set(subId, { subscriptions });  // Replay on reconnect
 
     const handler = (price: CryptoPrice) => {
       if (symbols.includes(price.symbol)) {
@@ -685,6 +682,7 @@ export class RealtimeServiceV2 extends EventEmitter {
         this.off('cryptoPrice', handler);
         this.sendUnsubscription({ subscriptions });
         this.subscriptions.delete(subId);
+        this.subscriptionMessages.delete(subId);
       },
     };
 
@@ -751,6 +749,7 @@ export class RealtimeServiceV2 extends EventEmitter {
     }));
 
     this.sendSubscription({ subscriptions });
+    this.subscriptionMessages.set(subId, { subscriptions });  // Replay on reconnect
 
     const handler = (price: EquityPrice) => {
       if (symbols.includes(price.symbol)) {
@@ -767,6 +766,7 @@ export class RealtimeServiceV2 extends EventEmitter {
         this.off('equityPrice', handler);
         this.sendUnsubscription({ subscriptions });
         this.subscriptions.delete(subId);
+        this.subscriptionMessages.delete(subId);
       },
     };
 
@@ -802,6 +802,7 @@ export class RealtimeServiceV2 extends EventEmitter {
     ];
 
     this.sendSubscription({ subscriptions });
+    this.subscriptionMessages.set(subId, { subscriptions });  // Replay on reconnect
 
     const commentHandler = (comment: Comment) => handlers.onComment?.(comment);
     const reactionHandler = (reaction: Reaction) => handlers.onReaction?.(reaction);
@@ -818,6 +819,7 @@ export class RealtimeServiceV2 extends EventEmitter {
         this.off('reaction', reactionHandler);
         this.sendUnsubscription({ subscriptions });
         this.subscriptions.delete(subId);
+        this.subscriptionMessages.delete(subId);
       },
     };
 
@@ -850,6 +852,7 @@ export class RealtimeServiceV2 extends EventEmitter {
     ];
 
     this.sendSubscription({ subscriptions });
+    this.subscriptionMessages.set(subId, { subscriptions });  // Replay on reconnect
 
     const requestHandler = (request: RFQRequest) => handlers.onRequest?.(request);
     const quoteHandler = (quote: RFQQuote) => handlers.onQuote?.(quote);
@@ -866,6 +869,7 @@ export class RealtimeServiceV2 extends EventEmitter {
         this.off('rfqQuote', quoteHandler);
         this.sendUnsubscription({ subscriptions });
         this.subscriptions.delete(subId);
+        this.subscriptionMessages.delete(subId);
       },
     };
 
@@ -1015,8 +1019,11 @@ export class RealtimeServiceV2 extends EventEmitter {
       }
 
       case 'price_change': {
-        const change = this.parsePriceChange(payload, timestamp);
-        this.emit('priceChange', change);
+        // The CLOB channel batches changes for several assets in one frame and
+        // carries asset_id per entry, so emit one PriceChange per asset.
+        for (const change of this.parsePriceChanges(payload, timestamp)) {
+          this.emit('priceChange', change);
+        }
         break;
       }
 
@@ -1202,13 +1209,31 @@ export class RealtimeServiceV2 extends EventEmitter {
     };
   }
 
-  private parsePriceChange(payload: Record<string, unknown>, timestamp: number): PriceChange {
-    const changes = payload.price_changes as Array<{ price: string; size: string }> || [];
-    return {
-      assetId: payload.asset_id as string || '',
-      changes,
-      timestamp,
-    };
+  /**
+   * Split a price_change frame into one PriceChange per asset.
+   *
+   * Two shapes are supported: the top-level `asset_id` form, and the CLOB
+   * market-channel form where each entry of `price_changes` carries its own
+   * `asset_id` (a single frame can cover both sides of a market).
+   */
+  private parsePriceChanges(payload: Record<string, unknown>, timestamp: number): PriceChange[] {
+    const entries = (payload.price_changes as Array<Record<string, unknown>>) || [];
+    const topLevelAssetId = (payload.asset_id as string) || '';
+
+    const byAsset = new Map<string, Array<{ price: string; size: string }>>();
+    for (const entry of entries) {
+      const assetId = (entry.asset_id as string) || topLevelAssetId;
+      const bucket = byAsset.get(assetId);
+      const change = { price: String(entry.price ?? ''), size: String(entry.size ?? '') };
+      if (bucket) bucket.push(change);
+      else byAsset.set(assetId, [change]);
+    }
+
+    if (byAsset.size === 0) {
+      return topLevelAssetId ? [{ assetId: topLevelAssetId, changes: [], timestamp }] : [];
+    }
+
+    return [...byAsset].map(([assetId, changes]) => ({ assetId, changes, timestamp }));
   }
 
   private parseLastTrade(payload: Record<string, unknown>, timestamp: number): LastTradeInfo {

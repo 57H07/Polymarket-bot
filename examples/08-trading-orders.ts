@@ -13,6 +13,7 @@
  * Uncomment the order sections to test with real funds.
  */
 
+import 'dotenv/config';
 import {
   TradingService,
   RateLimiter,
@@ -24,13 +25,21 @@ import {
   formatUSDC,
   createUnifiedCache,
   type TickSize,
+  isValidPrivateKey,
+  describePrivateKeyProblem,
 } from '../src/index.js';
 
 // Test wallet private key (empty wallet for safety)
-const PRIVATE_KEY = process.env.POLYMARKET_PRIVATE_KEY || '0xYOUR_PRIVATE_KEY_HERE';
+const PRIVATE_KEY = process.env.POLYMARKET_PRIVATE_KEY;
 
 async function main() {
   console.log('=== Polymarket Trading Examples (TradingService) ===\n');
+
+  if (!isValidPrivateKey(PRIVATE_KEY)) {
+    console.log(describePrivateKeyProblem(PRIVATE_KEY));
+    console.log('This example needs a signing key. Set POLYMARKET_PRIVATE_KEY in .env and re-run.');
+    return;
+  }
 
   // Initialize SDK and TradingService
   const sdk = new PolymarketSDK();

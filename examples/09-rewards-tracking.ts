@@ -10,19 +10,28 @@
  * NOTE: Requires a wallet with trading history to see earnings.
  */
 
+import 'dotenv/config';
 import {
   TradingService,
   RateLimiter,
   PolymarketSDK,
   formatUSDC,
   createUnifiedCache,
+  isValidPrivateKey,
+  describePrivateKeyProblem,
 } from '../src/index.js';
 
 // Test wallet private key
-const PRIVATE_KEY = process.env.POLYMARKET_PRIVATE_KEY || '0xYOUR_PRIVATE_KEY_HERE';
+const PRIVATE_KEY = process.env.POLYMARKET_PRIVATE_KEY;
 
 async function main() {
   console.log('=== Polymarket Rewards Tracking (TradingService) ===\n');
+
+  if (!isValidPrivateKey(PRIVATE_KEY)) {
+    console.log(describePrivateKeyProblem(PRIVATE_KEY));
+    console.log('This example needs a signing key. Set POLYMARKET_PRIVATE_KEY in .env and re-run.');
+    return;
+  }
 
   const sdk = new PolymarketSDK();
   const rateLimiter = new RateLimiter();

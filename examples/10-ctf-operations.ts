@@ -34,6 +34,7 @@
  * - POLYGON_RPC_URL: (optional) Custom RPC URL
  */
 
+import 'dotenv/config';
 import {
   CTFClient,
   PolymarketSDK,

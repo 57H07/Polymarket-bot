@@ -30,9 +30,20 @@ import {
   DipArbService,
   type SmartMoneyTrade,
 } from './src/index.js';
+import { normalizePrivateKey, isValidPrivateKey, describePrivateKeyProblem } from './src/utils/private-key.js';
 import { CTFClient, type MarketResolution, type TokenIds } from './src/clients/ctf-client.js';
 import type { ArbitrageMarketConfig, ArbitrageOpportunity, ArbitrageExecutionResult } from './src/services/arbitrage-service.js';
 import type { DipArbMarketConfig, DipArbSettleResult } from './src/services/dip-arb-types.js';
+
+/**
+ * The signing key, resolved once. `null` means "no usable key": unset, a
+ * placeholder, or malformed. `KEY_PROBLEM` explains why, for the startup check.
+ * Simulation never needs a key, so a bad one must not stop the bot booting.
+ */
+const KEY_PROBLEM = describePrivateKeyProblem(process.env.POLYMARKET_PRIVATE_KEY);
+const SIGNING_KEY = isValidPrivateKey(process.env.POLYMARKET_PRIVATE_KEY)
+  ? normalizePrivateKey(process.env.POLYMARKET_PRIVATE_KEY)!
+  : null;
 import type { MarketOrderParams } from './src/services/trading-service.js';
 import { startDashboard, dashboardEmitter } from './src/dashboard/index.js';
 import type { BotState, BotConfig, LogLevel, DipArbSignal, SmartMoneySignal } from './src/dashboard/types.js';
@@ -853,7 +864,7 @@ async function setupArbitrage() {
   updateDashboard();
 
   arbService = new ArbitrageService({
-    privateKey: paper ? undefined : process.env.POLYMARKET_PRIVATE_KEY,
+    privateKey: paper ? undefined : SIGNING_KEY ?? undefined,
     tradingClient: paper ?? undefined,
     ctfClient: paper ?? undefined,
     profitThreshold: CONFIG.arbitrage.profitThreshold,
@@ -1326,9 +1337,9 @@ async function setupSwap() {
   if (paper) return;
   log('SWAP', 'Setting up Wallet & Balance Monitor...');
   try {
-    if (!process.env.POLYMARKET_PRIVATE_KEY) return;
+    if (!SIGNING_KEY) return;
     const provider = new ethers.providers.JsonRpcProvider('https://polygon-rpc.com');
-    const signer = new ethers.Wallet(process.env.POLYMARKET_PRIVATE_KEY, provider);
+    const signer = new ethers.Wallet(SIGNING_KEY, provider);
     swapService = new SwapService(signer);
     await updateBalances();
     log('SWAP', 'Balances:', { matic: state.maticBalance.toFixed(4), usdce: `$${state.usdcEBalance.toFixed(2)}` });
@@ -1349,8 +1360,8 @@ async function setupOnchain() {
   if (!CONFIG.onchain.enabled || paper) return;
   log('CHAIN', 'Checking on-chain approvals...');
   try {
-    if (!process.env.POLYMARKET_PRIVATE_KEY) return;
-    const onchain = new OnchainService({ privateKey: process.env.POLYMARKET_PRIVATE_KEY, rpcUrl: 'https://polygon-rpc.com' });
+    if (!SIGNING_KEY) return;
+    const onchain = new OnchainService({ privateKey: SIGNING_KEY, rpcUrl: 'https://polygon-rpc.com' });
     if (CONFIG.onchain.autoApprove) {
       log('CHAIN', 'Auto-approving Exchange contracts (unlimited USDC.e allowance + CTF operator)...');
       const result = await onchain.approveAll();
@@ -1456,7 +1467,7 @@ function dashboardConfig(): BotConfig {
 
 async function switchMode(wantDryRun: boolean) {
   if (CONFIG.dryRun === wantDryRun) return;
-  if (!wantDryRun && (ALLOW_LIVE_TOGGLE !== 'true' || !process.env.POLYMARKET_PRIVATE_KEY)) {
+  if (!wantDryRun && (ALLOW_LIVE_TOGGLE !== 'true' || !SIGNING_KEY)) {
     log('ERROR', 'Refused: switching to LIVE from the dashboard is disabled. Set ALLOW_DASHBOARD_LIVE_TOGGLE=true and a private key in .env, or restart with DRY_RUN=false.');
     return;
   }
@@ -1478,7 +1489,7 @@ async function switchMode(wantDryRun: boolean) {
     await sdk.initialize();
     paper = null;
     state.paper = undefined;
-    liveCtf = new CTFClient({ privateKey: process.env.POLYMARKET_PRIVATE_KEY! });
+    liveCtf = new CTFClient({ privateKey: SIGNING_KEY! });
     loadLiveTrades();
     await setupOnchain();
     await setupSwap();
@@ -1594,23 +1605,28 @@ async function main() {
   });
   console.log(`\n🌐 Dashboard: http://localhost:${dashboardPort}\n`);
 
-  if (!process.env.POLYMARKET_PRIVATE_KEY && !CONFIG.dryRun) {
-    log('ERROR', 'POLYMARKET_PRIVATE_KEY not found in .env (required for LIVE mode)');
-    process.exit(1);
-  }
-  if (!process.env.POLYMARKET_PRIVATE_KEY && ALLOW_LIVE_TOGGLE === 'true') {
-    log('WARN', 'No private key: the dashboard LIVE toggle stays disabled');
+  if (!SIGNING_KEY) {
+    // KEY_PROBLEM is always set when SIGNING_KEY is null, and says exactly what
+    // is wrong (unset, placeholder, a wallet address pasted in, or malformed).
+    if (!CONFIG.dryRun) {
+      log('ERROR', `${KEY_PROBLEM} (required for LIVE mode)`);
+      process.exit(1);
+    }
+    log('WARN', `${KEY_PROBLEM} Simulation does not need one; continuing.`);
+    if (ALLOW_LIVE_TOGGLE === 'true') {
+      log('WARN', 'No usable private key: the dashboard LIVE toggle stays disabled');
+    }
   }
 
   if (CONFIG.dryRun) {
     // Simulation needs market data and the WebSocket only: no CLOB API key, and
     // no private key at all (the SDK falls back to a throwaway key for reads).
-    sdk = new PolymarketSDK({ privateKey: process.env.POLYMARKET_PRIVATE_KEY });
+    sdk = new PolymarketSDK({ privateKey: SIGNING_KEY ?? undefined });
     sdk.connect();
     try { await sdk.waitForConnection(15000); } catch (err) { log('WARN', `Realtime WebSocket not connected yet: ${(err as Error).message}`); }
-    if (process.env.POLYMARKET_PRIVATE_KEY) log('INFO', `Wallet: ${sdk.tradingService.getAddress()} (not used in simulation)`);
+    if (SIGNING_KEY) log('INFO', `Wallet: ${sdk.tradingService.getAddress()} (not used in simulation)`);
   } else {
-    sdk = await PolymarketSDK.create({ privateKey: process.env.POLYMARKET_PRIVATE_KEY! });
+    sdk = await PolymarketSDK.create({ privateKey: SIGNING_KEY! });
     log('INFO', `Wallet: ${sdk.tradingService.getAddress()}`);
   }
   readOnlyCtf = new CTFClient({ privateKey: '0x' + '1'.repeat(64) });
@@ -1618,7 +1634,7 @@ async function main() {
   if (CONFIG.dryRun) {
     setupPaperBroker();
   } else {
-    liveCtf = new CTFClient({ privateKey: process.env.POLYMARKET_PRIVATE_KEY! });
+    liveCtf = new CTFClient({ privateKey: SIGNING_KEY! });
     loadLiveTrades();
   }
   loadRiskForCurrentMode();

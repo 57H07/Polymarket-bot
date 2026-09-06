@@ -4,6 +4,55 @@
 
 ---
 
+## Update 2026-09: CLOB topics moved off the RTDS socket
+
+**Polymarket removed the `clob_market` and `clob_user` topics from
+`wss://ws-live-data.polymarket.com`.** Subscribing to them there now returns:
+
+```json
+{"body":{"message":"CLOB messages are not supported anymore, ..."},"statusCode":400}
+```
+
+The vendored client swallows that frame into a `console.log("onMessage error")`
+(it only forwards frames containing the substring `payload`), so the failure was
+silent: subscriptions simply produced no data.
+
+`RealtimeServiceV2` therefore now uses **two transports**:
+
+| Transport | Endpoint | Topics |
+|-----------|----------|--------|
+| `@polymarket/real-time-data-client` (RTDS) | `wss://ws-live-data.polymarket.com` | `activity`, `crypto_prices`, `crypto_prices_chainlink`, `equity_prices`, `comments`, `rfq` |
+| `ClobSocket` (`src/services/clob-socket.ts`) | `wss://ws-subscriptions-clob.polymarket.com/ws/market` | orderbook, price changes, last trade, tick size |
+
+The CLOB channel speaks a different protocol from the RTDS one:
+
+- subscribe with `{assets_ids: [...], type: "market", custom_feature_enabled: true}`
+  — note `assets_ids`, **not** `asset_ids`;
+- the subscription must be sent immediately on open or the server closes;
+- keepalive is the literal string `PING` every 10s (server replies `PONG`);
+  idle sockets are dropped after roughly 10s;
+- there is no incremental unsubscribe — the full asset set is re-sent whenever
+  it changes;
+- events are tagged with `event_type` (`book`, `price_change`,
+  `last_trade_price`, `tick_size_change`, `best_bid_ask`) and a frame may carry
+  either a single event or an array of them;
+- `price_change` frames carry `asset_id` **per entry** of `price_changes[]`,
+  not at the top level.
+
+`ClobSocket` normalizes `event_type` onto the RTDS message types, so the
+existing parsers and the public `subscribeMarkets()` / `subscribeMarket()` API
+are unchanged for callers.
+
+**Not migrated:** `subscribeUserEvents()` (needs the authenticated
+`/ws/user` channel) and `subscribeMarketEvents()` (market lifecycle events are
+not carried on the CLOB channel — poll the Gamma API). Both now throw an
+explanatory error rather than silently returning a dead subscription.
+
+The table in section 2.1 below describes the RTDS topic set as it was before
+this change; the `clob_market` and `clob_user` rows no longer apply.
+
+---
+
 ## Migration Status: COMPLETED
 
 **As of 2024-12, the WebSocket migration has been completed.**

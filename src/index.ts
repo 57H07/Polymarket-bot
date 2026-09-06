@@ -373,12 +373,30 @@ export {
 } from './utils/price-utils.js';
 export type { TickSize } from './utils/price-utils.js';
 
+export {
+  ClobSocket,
+  CLOB_WS_MARKET_URL,
+  CLOB_WS_USER_URL,
+  type ClobMarketEvent,
+  type ClobSocketConfig,
+} from './services/clob-socket.js';
+
+export {
+  normalizePrivateKey,
+  isValidPrivateKey,
+  describePrivateKeyProblem,
+  assertPrivateKey,
+  READ_ONLY_PRIVATE_KEY,
+  PLACEHOLDER_KEYS,
+} from './utils/private-key.js';
+
 // NOTE: MCP tools have been moved to @catalyst-team/poly-mcp package
 // See packages/poly-mcp/
 
 // ===== Main SDK Class =====
 
 import { RateLimiter } from './core/rate-limiter.js';
+import { normalizePrivateKey, READ_ONLY_PRIVATE_KEY } from './utils/private-key.js';
 import { DataApiClient } from './clients/data-api.js';
 import { GammaApiClient } from './clients/gamma-api.js';
 import { SubgraphClient } from './clients/subgraph.js';
@@ -428,8 +446,11 @@ export class PolymarketSDK {
     this.dataApi = new DataApiClient(this.rateLimiter, this.cache);
     this.gammaApi = new GammaApiClient(this.rateLimiter, this.cache);
 
-    // TradingService requires a private key - use provided key or dummy key for read-only
-    const privateKey = config.privateKey || '0x' + '1'.repeat(64);
+    // TradingService requires a private key. An unset or placeholder key falls
+    // back to a throwaway key so read-only usage works; a malformed key throws
+    // with an actionable message instead of a raw ethers stack trace.
+    const signingKey = normalizePrivateKey(config.privateKey);
+    const privateKey = signingKey ?? READ_ONLY_PRIVATE_KEY;
     this.tradingService = new TradingService(this.rateLimiter, this.cache, {
       privateKey,
       chainId: config.chainId,
@@ -456,7 +477,8 @@ export class PolymarketSDK {
       this.realtime,
       this.tradingService,
       this.markets,
-      config.privateKey,
+      // undefined (not the throwaway key) so DipArb stays read-only without a real key
+      signingKey ?? undefined,
       config.chainId
     );
   }
