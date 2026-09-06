@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { checkExposure, dynamicPositionPct, evaluateExit } from './position-sizing.js';
+import { checkExposure, dynamicPositionPct, evaluateExit, eventKeyFromSlug } from './position-sizing.js';
 
 const sizing = {
   enableDynamicSizing: true,
@@ -104,5 +104,84 @@ describe('evaluateExit', () => {
   it('ignores invalid prices', () => {
     expect(evaluateExit({ entryPrice: 0, peakPrice: 0, openedAt: 0 }, 0.5, 1, rules)).toBeNull();
     expect(evaluateExit({ entryPrice: 0.5, peakPrice: 0.5, openedAt: 0 }, NaN, 1, rules)).toBeNull();
+  });
+});
+
+describe('eventKeyFromSlug', () => {
+  it('groups every market of one match under the event', () => {
+    const key = eventKeyFromSlug('lal-val-bar-2026-09-06-total-3pt5', 'cond');
+    expect(key).toBe('lal-val-bar-2026-09-06');
+    expect(eventKeyFromSlug('lal-val-bar-2026-09-06-draw', 'cond')).toBe(key);
+    expect(eventKeyFromSlug('lal-val-bar-2026-09-06-spread-away-1pt5', 'cond')).toBe(key);
+  });
+
+  it('keeps the bare event slug, with no trailing market type', () => {
+    expect(eventKeyFromSlug('mlb-atl-phi-2026-09-06', 'cond')).toBe('mlb-atl-phi-2026-09-06');
+  });
+
+  it('separates the same fixture on different dates', () => {
+    expect(eventKeyFromSlug('lal-val-bar-2026-09-06-draw', 'c'))
+      .not.toBe(eventKeyFromSlug('lal-val-bar-2026-09-13-draw', 'c'));
+  });
+
+  it('falls back to the condition id when the slug carries no ISO date', () => {
+    // Grouping too little is safe; merging unrelated events would not be.
+    expect(eventKeyFromSlug('highest-temperature-in-dallas-on-september-6-2026-90-94', 'cond-a'))
+      .toBe('cond-a');
+    expect(eventKeyFromSlug(undefined, 'cond-a')).toBe('cond-a');
+    expect(eventKeyFromSlug('', 'cond-a')).toBe('cond-a');
+  });
+});
+
+describe('checkExposure - per-event cap', () => {
+  // $250 book: 10% per market ($25), 15% per event ($37.50).
+  const limits = {
+    capitalUsd: 250,
+    maxPerTradePct: 0.05,
+    maxPerMarketPct: 0.10,
+    maxPerEventPct: 0.15,
+    maxTotalExposurePct: 0.80,
+    minOrderUsd: 1,
+    strategyAllocation: { smartMoney: 0.9 },
+  };
+
+  it('refuses correlated markets once the event is full', () => {
+    // Three markets of one match, each under the per-market cap, together over
+    // the event cap. This is the case that put 19% of a book on one game.
+    const d = checkExposure(limits, 'smartMoney', 5,
+      { total: 37, market: 0, strategy: 37, event: 37 });
+    expect(d.allowed).toBe(false);
+    expect(d.reason).toContain('maxPerEvent');
+  });
+
+  it('clamps to what the event has left', () => {
+    const d = checkExposure(limits, 'smartMoney', 10,
+      { total: 30, market: 0, strategy: 30, event: 30 });
+    expect(d.allowed).toBe(true);
+    expect(d.sizeUsd).toBeCloseTo(7.5);
+    expect(d.reason).toBe('maxPerEvent');
+  });
+
+  it('leaves an unrelated event untouched', () => {
+    const d = checkExposure(limits, 'smartMoney', 10,
+      { total: 37, market: 0, strategy: 37, event: 0 });
+    expect(d.allowed).toBe(true);
+    expect(d.sizeUsd).toBe(10);
+  });
+
+  it('is disabled when maxPerEventPct is omitted', () => {
+    const { maxPerEventPct, ...without } = limits;
+    void maxPerEventPct;
+    const d = checkExposure(without, 'smartMoney', 10,
+      { total: 37, market: 0, strategy: 37, event: 37 });
+    expect(d.allowed).toBe(true);
+    expect(d.sizeUsd).toBe(10);
+  });
+
+  it('falls back to the market exposure when no event figure is supplied', () => {
+    // An older caller passing no `event` must not get a free pass.
+    const d = checkExposure(limits, 'smartMoney', 5,
+      { total: 37, market: 37, strategy: 37 });
+    expect(d.allowed).toBe(false);
   });
 });

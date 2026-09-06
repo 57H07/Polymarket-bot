@@ -134,6 +134,8 @@ export interface BotConfig {
     totalUsd: number;
     maxPerTradePct: number;
     maxPerMarketPct: number;
+    /** Cap across every market of one event; undefined disables it. */
+    maxPerEventPct?: number;
     maxTotalExposurePct: number;
     minOrderUsd: number;
     strategyAllocation: Record<string, number>;

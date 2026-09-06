@@ -59,6 +59,7 @@ import {
 } from './src/core/risk-manager.js';
 import {
   checkExposure,
+  eventKeyFromSlug,
   dynamicPositionPct,
   evaluateExit,
   type ExitRules,
@@ -80,6 +81,9 @@ const CONFIG = {
     totalUsd: parseFloat(process.env.CAPITAL_USD || '250'),
     maxPerTradePct: 0.02,
     maxPerMarketPct: 0.10,
+    // One event carries a dozen markets, so the per-market cap alone allowed
+    // 19% of the book to pile onto a single match under a "10% limit".
+    maxPerEventPct: parseFloat(process.env.MAX_PER_EVENT_PCT || '0.15'),
     // Raise this to measure the strategies rather than the ceiling: at 0.30 of
     // a $50 book with $1 orders, the cap binds within minutes and every later
     // signal is refused.
@@ -506,18 +510,25 @@ function openTrades(): OpenTradeEntry[] {
  * Clamp a desired order to the capital limits: dynamic per-trade size,
  * per-market cap, total exposure cap and per-strategy allocation.
  */
-function sizeOrder(strategy: Strategy, desiredUsd: number, conditionId: string): { ok: boolean; usd: number; reason?: string } {
+function sizeOrder(strategy: Strategy, desiredUsd: number, conditionId: string, slug?: string): { ok: boolean; usd: number; reason?: string } {
   const open = openTrades();
+  const eventKey = eventKeyFromSlug(slug, conditionId);
   const exposure = {
     total: open.reduce((s, t) => s + t.usd, 0),
     market: open.filter(t => t.conditionId === conditionId).reduce((s, t) => s + t.usd, 0),
     strategy: open.filter(t => t.strategy === strategy).reduce((s, t) => s + t.usd, 0),
+    // `title` holds the market slug for copied trades; positions whose slug
+    // carries no date group under their own condition id, as before.
+    event: open
+      .filter(t => eventKeyFromSlug(t.title, t.conditionId) === eventKey)
+      .reduce((s, t) => s + t.usd, 0),
   };
   const decision = checkExposure({
     capitalUsd: CONFIG.capital.totalUsd,
     maxPerTradePct: positionPct(),
     maxPerMarketPct: CONFIG.capital.maxPerMarketPct,
     maxTotalExposurePct: CONFIG.capital.maxTotalExposurePct,
+    maxPerEventPct: CONFIG.capital.maxPerEventPct,
     minOrderUsd: CONFIG.capital.minOrderUsd,
     strategyAllocation: CONFIG.capital.strategyAllocation,
   }, strategy, desiredUsd, exposure);
@@ -850,7 +861,7 @@ async function handleSmartMoneyTrade(trade: SmartMoneyTrade) {
   const leaderValue = trade.size * trade.price;
   if (leaderValue < cfg.minTradeSize) return;
   const desired = Math.min(leaderValue * cfg.sizeScale, cfg.maxSizePerTrade);
-  const sized = sizeOrder('smartMoney', desired, meta.conditionId);
+  const sized = sizeOrder('smartMoney', desired, meta.conditionId, meta.title);
   if (!sized.ok) {
     log('INFO', `Copy skipped (${sized.reason})`);
     return;

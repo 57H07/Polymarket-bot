@@ -44,6 +44,13 @@ export interface ExposureLimits {
   maxPerMarketPct: number;
   maxTotalExposurePct: number;
   minOrderUsd: number;
+  /**
+   * Fraction of capital allowed across every market of one event. A single
+   * match carries a dozen markets - winner, spread, totals, both-halves - so
+   * the per-market cap alone lets correlated bets stack far past it. Omit to
+   * disable the cap.
+   */
+  maxPerEventPct?: number;
   /** Fraction of capital each strategy may have open at once */
   strategyAllocation: Record<string, number>;
 }
@@ -55,6 +62,37 @@ export interface OpenExposure {
   market: number;
   /** Cost basis of open positions opened by this strategy */
   strategy: number;
+  /** Cost basis of open positions on any market of the same event */
+  event?: number;
+}
+
+/**
+ * Matches the ISO date Polymarket puts in a sports slug: `-2026-09-06`.
+ * Month and day are range-checked: a loose `\d{2}-\d{2}` also matched the
+ * `-2026-90-94` tail of `highest-temperature-in-dallas-on-september-6-2026-90-94`,
+ * which would have grouped unrelated temperature bands as one event.
+ */
+const SLUG_DATE_RE = /^(.*?-\d{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01]))(?:-|$)/;
+
+/**
+ * Groups the markets of one event from their slugs.
+ *
+ * Polymarket names a match's markets by appending the market type to a common
+ * prefix ending in the date: `lal-val-bar-2026-09-06-total-3pt5`,
+ * `-draw`, `-spread-away-1pt5` all belong to one game. Everything up to and
+ * including that date is the event.
+ *
+ * This is a heuristic on the slug, not an identifier from the API. Slugs that
+ * carry no ISO date - `highest-temperature-in-dallas-on-september-6-2026-90-94`
+ * - fall back to `fallback` (the condition id), which leaves those positions
+ * grouped per market exactly as before: too little grouping, which is the safe
+ * direction. A slug whose tail happens to read as a valid date would still be
+ * misgrouped, so this is a heuristic, not a guarantee.
+ */
+export function eventKeyFromSlug(slug: string | undefined, fallback: string): string {
+  if (!slug) return fallback;
+  const match = SLUG_DATE_RE.exec(slug);
+  return match ? match[1] : fallback;
 }
 
 export interface ExposureDecision {
@@ -81,6 +119,9 @@ export function checkExposure(
     ['maxPerMarket', limits.capitalUsd * limits.maxPerMarketPct - open.market],
     ['maxTotalExposure', limits.capitalUsd * limits.maxTotalExposurePct - open.total],
   ];
+  if (limits.maxPerEventPct !== undefined) {
+    caps.push(['maxPerEvent', limits.capitalUsd * limits.maxPerEventPct - (open.event ?? open.market)]);
+  }
   const allocation = limits.strategyAllocation[strategy];
   if (allocation !== undefined) {
     caps.push([`allocation:${strategy}`, limits.capitalUsd * allocation - open.strategy]);
