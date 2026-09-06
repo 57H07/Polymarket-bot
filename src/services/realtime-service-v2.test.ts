@@ -12,13 +12,14 @@ import type { PriceUpdate } from '../core/types.js';
  */
 type WithPrivates = {
   calculateDerivedPrice(assetId: string, book: OrderbookSnapshot): PriceUpdate | null;
+  handleActivityMessage(type: string, payload: Record<string, unknown>, timestamp: number): void;
   lastTradeCache: Map<string, { assetId: string; price: number; side: string; size: number; timestamp: number }>;
 };
 
 // Cast through unknown: the private members make a plain intersection
 // collapse to never.
-function service(): WithPrivates {
-  return new RealtimeServiceV2() as unknown as WithPrivates;
+function service(config?: ConstructorParameters<typeof RealtimeServiceV2>[0]): WithPrivates {
+  return new RealtimeServiceV2(config) as unknown as WithPrivates;
 }
 
 function book(
@@ -92,5 +93,98 @@ describe('calculateDerivedPrice', () => {
   it('returns null only when both sides are empty', () => {
     const s = service();
     expect(s.calculateDerivedPrice('token-a', book([], []))).toBeNull();
+  });
+});
+
+
+/**
+ * The activity feed delivers each trade on both the `trades` and
+ * `orders_matched` types, and subscribeActivity subscribes to both. Before
+ * deduplication this fired every copy-trading signal twice: a one-hour
+ * simulation bought 6 of 14 markets twice, at identical price and size,
+ * 117-477ms apart, and burned the exposure budget at double rate.
+ */
+describe('activity deduplication', () => {
+  const payload = (over: Record<string, unknown> = {}) => ({
+    asset: 'token-a',
+    conditionId: '0xcond',
+    slug: 'epl-eve-mun-first-half-total-1pt5',
+    outcome: 'Over',
+    price: 0.38,
+    side: 'BUY',
+    size: 396.7,
+    timestamp: 1_788_691_393,
+    transactionHash: '0xtx1',
+    proxyWallet: '0x821dab05',
+    ...over,
+  });
+
+  function collect(s: RealtimeServiceV2) {
+    const seen: unknown[] = [];
+    s.on('activityTrade', (t) => seen.push(t));
+    return seen;
+  }
+
+  it('emits the same trade once when it arrives on both types', () => {
+    const s = service();
+    const seen = collect(s as unknown as RealtimeServiceV2);
+    (s as WithPrivates).handleActivityMessage('trades', payload(), 1);
+    (s as WithPrivates).handleActivityMessage('orders_matched', payload(), 1);
+    expect(seen).toHaveLength(1);
+  });
+
+  it('keeps distinct fills that share a transaction hash', () => {
+    const s = service();
+    const seen = collect(s as unknown as RealtimeServiceV2);
+    // One transaction can match several orders - those are real, separate fills.
+    (s as WithPrivates).handleActivityMessage('trades', payload(), 1);
+    (s as WithPrivates).handleActivityMessage('trades', payload({ price: 0.39 }), 1);
+    (s as WithPrivates).handleActivityMessage('trades', payload({ asset: 'token-b' }), 1);
+    expect(seen).toHaveLength(3);
+  });
+
+  it('keeps trades by different traders that share a transaction hash', () => {
+    const s = service();
+    const seen = collect(s as unknown as RealtimeServiceV2);
+    // Observed live: one transaction filling several makers, same side, size
+    // and price. Dropping either of these would lose a real copy signal.
+    (s as WithPrivates).handleActivityMessage('trades', payload({ proxyWallet: '0xaaa' }), 1);
+    (s as WithPrivates).handleActivityMessage('trades', payload({ proxyWallet: '0xbbb' }), 1);
+    expect(seen).toHaveLength(2);
+  });
+
+  it('keeps repeated trades by one trader under different hashes', () => {
+    const s = service();
+    const seen = collect(s as unknown as RealtimeServiceV2);
+    // Observed live: one wallet repeating the same size/price many times.
+    (s as WithPrivates).handleActivityMessage('trades', payload({ transactionHash: '0xtx1' }), 1);
+    (s as WithPrivates).handleActivityMessage('trades', payload({ transactionHash: '0xtx2' }), 1);
+    expect(seen).toHaveLength(2);
+  });
+
+  it('falls back to the event timestamp when there is no tx hash', () => {
+    const s = service();
+    const seen = collect(s as unknown as RealtimeServiceV2);
+    (s as WithPrivates).handleActivityMessage('trades', payload({ transactionHash: '' }), 1);
+    (s as WithPrivates).handleActivityMessage('orders_matched', payload({ transactionHash: '' }), 1);
+    expect(seen).toHaveLength(1);
+  });
+
+  it('treats a later identical trade as genuine once the window has passed', () => {
+    const s = service({ activityDedupWindowMs: 1 });
+    const seen = collect(s as unknown as RealtimeServiceV2);
+    (s as WithPrivates).handleActivityMessage('trades', payload(), 1);
+    const start = Date.now();
+    while (Date.now() - start < 5) { /* let the 1ms window lapse */ }
+    (s as WithPrivates).handleActivityMessage('trades', payload(), 1);
+    expect(seen).toHaveLength(2);
+  });
+
+  it('can be disabled', () => {
+    const s = service({ activityDedupWindowMs: 0 });
+    const seen = collect(s as unknown as RealtimeServiceV2);
+    (s as WithPrivates).handleActivityMessage('trades', payload(), 1);
+    (s as WithPrivates).handleActivityMessage('orders_matched', payload(), 1);
+    expect(seen).toHaveLength(2);
   });
 });

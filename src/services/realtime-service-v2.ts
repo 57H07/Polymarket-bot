@@ -34,6 +34,15 @@ export interface RealtimeServiceConfig {
   pingInterval?: number;
   /** Enable debug logging (default: false) */
   debug?: boolean;
+  /**
+   * Window in ms over which an identical activity trade is treated as a
+   * duplicate and dropped (default: 30000). Set to 0 to disable.
+   *
+   * The activity feed delivers the same trade on both the `trades` and
+   * `orders_matched` types, and a reconnect can replay recent events, so
+   * without this every copy-trading signal fires twice.
+   */
+  activityDedupWindowMs?: number;
 }
 
 // Market data types
@@ -263,6 +272,14 @@ export class RealtimeServiceV2 extends EventEmitter {
   private clobSocket: ClobSocket | null = null;
   /** Per-subscription CLOB error listeners, so unsubscribe() can detach them. */
   private clobErrorHandlers: Map<string, (err: Error) => void> = new Map();
+
+  /**
+   * Recently seen activity trades, keyed as described in activityKey, with the
+   * local time they were first seen. Insertion-ordered, so expiry prunes from
+   * the front. Used to drop duplicate deliveries of the same trade.
+   */
+  private recentActivity: Map<string, number> = new Map();
+  private static readonly MAX_RECENT_ACTIVITY = 5000;
   private config: RealtimeServiceConfig;
   private subscriptions: Map<string, Subscription> = new Map();
   private subscriptionIdCounter = 0;
@@ -290,6 +307,7 @@ export class RealtimeServiceV2 extends EventEmitter {
       autoReconnect: config.autoReconnect ?? true,
       pingInterval: config.pingInterval ?? 5000,
       debug: config.debug ?? false,
+      activityDedupWindowMs: config.activityDedupWindowMs ?? 30_000,
     };
   }
 
@@ -1101,7 +1119,64 @@ export class RealtimeServiceV2 extends EventEmitter {
         address: payload.proxyWallet as string | undefined,
       },
     };
+    if (this.isDuplicateActivity(trade)) {
+      this.log(`Dropped duplicate activity trade (${type})`);
+      return;
+    }
+
     this.emit('activityTrade', trade);
+  }
+
+  /**
+   * Key an activity trade for duplicate detection.
+   *
+   * The transaction hash alone is not enough. Observed on the live feed over
+   * 90s (7247 events):
+   *
+   * - same hash, same trader, ~100-200ms apart: the same fill delivered on
+   *   both the `trades` and `orders_matched` types. This is the duplicate.
+   * - same hash, *different* traders, same side/size/price: one transaction
+   *   filling several makers. Genuinely distinct trades - hence the trader in
+   *   the key, without which a real copy signal would be dropped.
+   * - different hashes, same trader, same size/price: one wallet repeating a
+   *   trade. Genuinely distinct - hence the hash in the key.
+   *
+   * Some payloads carry no transaction hash; those fall back to the trade's
+   * own timestamp, which is stable across redeliveries of the same event
+   * (unlike our local receive time).
+   */
+  private activityKey(trade: ActivityTrade): string {
+    const trader = trade.trader?.address ?? '';
+    const identity = trade.transactionHash || `@${trade.timestamp}`;
+    return `${identity}|${trader}|${trade.asset}|${trade.side}|${trade.size}|${trade.price}`;
+  }
+
+  private isDuplicateActivity(trade: ActivityTrade): boolean {
+    const windowMs = this.config.activityDedupWindowMs ?? 30_000;
+    if (windowMs <= 0) return false;
+
+    const now = Date.now();
+
+    // Entries are inserted in time order and never refreshed, so expired ones
+    // are always at the front.
+    for (const [key, seenAt] of this.recentActivity) {
+      if (now - seenAt < windowMs) break;
+      this.recentActivity.delete(key);
+    }
+
+    const key = this.activityKey(trade);
+    if (this.recentActivity.has(key)) return true;
+
+    this.recentActivity.set(key, now);
+
+    // Hard cap in case the feed is far busier than the window assumes.
+    while (this.recentActivity.size > RealtimeServiceV2.MAX_RECENT_ACTIVITY) {
+      const oldest = this.recentActivity.keys().next().value;
+      if (oldest === undefined) break;
+      this.recentActivity.delete(oldest);
+    }
+
+    return false;
   }
 
   private handleCryptoPriceMessage(payload: Record<string, unknown>, timestamp: number): void {
