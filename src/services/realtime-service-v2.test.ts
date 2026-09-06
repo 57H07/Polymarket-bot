@@ -148,17 +148,39 @@ describe('activity deduplication', () => {
     const seen = collect(s as unknown as RealtimeServiceV2);
     // Observed live: one transaction filling several makers, same side, size
     // and price. Dropping either of these would lose a real copy signal.
-    (s as WithPrivates).handleActivityMessage('trades', payload({ proxyWallet: '0xaaa' }), 1);
-    (s as WithPrivates).handleActivityMessage('trades', payload({ proxyWallet: '0xbbb' }), 1);
+    (s as WithPrivates).handleActivityMessage('trades', payload({ proxyWallet: '0xaaa', transactionHash: '0xtx1' }), 1);
+    (s as WithPrivates).handleActivityMessage('trades', payload({ proxyWallet: '0xbbb', transactionHash: '0xtx1' }), 1);
     expect(seen).toHaveLength(2);
   });
 
-  it('keeps repeated trades by one trader under different hashes', () => {
+  it('collapses one order reported once per maker fill', () => {
     const s = service();
     const seen = collect(s as unknown as RealtimeServiceV2);
-    // Observed live: one wallet repeating the same size/price many times.
+    // Observed live: five events, same wallet/market/side/size/price, distinct
+    // hashes, within 200ms - one order filled by several makers, each event
+    // carrying the order's total size.
+    for (const hash of ['0xtx1', '0xtx2', '0xtx3', '0xtx4', '0xtx5']) {
+      (s as WithPrivates).handleActivityMessage('trades', payload({ transactionHash: hash }), 1);
+    }
+    expect(seen).toHaveLength(1);
+  });
+
+  it('keeps an identical trade repeated after the fragment window', () => {
+    const s = service({ activityFragmentWindowMs: 1 });
+    const seen = collect(s as unknown as RealtimeServiceV2);
     (s as WithPrivates).handleActivityMessage('trades', payload({ transactionHash: '0xtx1' }), 1);
+    const start = Date.now();
+    while (Date.now() - start < 5) { /* let the 1ms window lapse */ }
     (s as WithPrivates).handleActivityMessage('trades', payload({ transactionHash: '0xtx2' }), 1);
+    expect(seen).toHaveLength(2);
+  });
+
+  it('does not merge fills of different sizes from one order', () => {
+    const s = service();
+    const seen = collect(s as unknown as RealtimeServiceV2);
+    // Partial fills report different sizes: these are distinct information.
+    (s as WithPrivates).handleActivityMessage('trades', payload({ transactionHash: '0xtx1', size: 100 }), 1);
+    (s as WithPrivates).handleActivityMessage('trades', payload({ transactionHash: '0xtx2', size: 250 }), 1);
     expect(seen).toHaveLength(2);
   });
 
@@ -171,7 +193,7 @@ describe('activity deduplication', () => {
   });
 
   it('treats a later identical trade as genuine once the window has passed', () => {
-    const s = service({ activityDedupWindowMs: 1 });
+    const s = service({ activityDedupWindowMs: 1, activityFragmentWindowMs: 1 });
     const seen = collect(s as unknown as RealtimeServiceV2);
     (s as WithPrivates).handleActivityMessage('trades', payload(), 1);
     const start = Date.now();
@@ -181,7 +203,7 @@ describe('activity deduplication', () => {
   });
 
   it('can be disabled', () => {
-    const s = service({ activityDedupWindowMs: 0 });
+    const s = service({ activityDedupWindowMs: 0, activityFragmentWindowMs: 0 });
     const seen = collect(s as unknown as RealtimeServiceV2);
     (s as WithPrivates).handleActivityMessage('trades', payload(), 1);
     (s as WithPrivates).handleActivityMessage('orders_matched', payload(), 1);

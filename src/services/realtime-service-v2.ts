@@ -43,6 +43,17 @@ export interface RealtimeServiceConfig {
    * without this every copy-trading signal fires twice.
    */
   activityDedupWindowMs?: number;
+  /**
+   * Window in ms over which trades sharing an economic identity (same trader,
+   * market, side, size and price) but *different* transaction hashes are
+   * treated as one order (default: 2000). Set to 0 to disable.
+   *
+   * One order filled by several makers is reported as several events, each
+   * carrying the order's total size - observed live as five events of
+   * 751.9 shares @ 0.630 from one wallet within 200ms. Without this a copy
+   * strategy acts on each fill as though it were a separate decision.
+   */
+  activityFragmentWindowMs?: number;
 }
 
 // Market data types
@@ -279,6 +290,8 @@ export class RealtimeServiceV2 extends EventEmitter {
    * the front. Used to drop duplicate deliveries of the same trade.
    */
   private recentActivity: Map<string, number> = new Map();
+  /** Same, keyed by economic identity, to collapse one order's many fills. */
+  private recentActivityOrders: Map<string, number> = new Map();
   private static readonly MAX_RECENT_ACTIVITY = 5000;
   private config: RealtimeServiceConfig;
   private subscriptions: Map<string, Subscription> = new Map();
@@ -308,6 +321,7 @@ export class RealtimeServiceV2 extends EventEmitter {
       pingInterval: config.pingInterval ?? 5000,
       debug: config.debug ?? false,
       activityDedupWindowMs: config.activityDedupWindowMs ?? 30_000,
+      activityFragmentWindowMs: config.activityFragmentWindowMs ?? 2_000,
     };
   }
 
@@ -1146,34 +1160,74 @@ export class RealtimeServiceV2 extends EventEmitter {
    * (unlike our local receive time).
    */
   private activityKey(trade: ActivityTrade): string {
-    const trader = trade.trader?.address ?? '';
     const identity = trade.transactionHash || `@${trade.timestamp}`;
-    return `${identity}|${trader}|${trade.asset}|${trade.side}|${trade.size}|${trade.price}`;
+    return `${identity}|${this.activityOrderKey(trade)}`;
   }
 
-  private isDuplicateActivity(trade: ActivityTrade): boolean {
-    const windowMs = this.config.activityDedupWindowMs ?? 30_000;
-    if (windowMs <= 0) return false;
+  /**
+   * The economic identity of a trade, ignoring which transaction carried it:
+   * who traded what, which way, how much, at what price. Two events matching
+   * on this within a short window are one order reported once per fill.
+   */
+  private activityOrderKey(trade: ActivityTrade): string {
+    const trader = trade.trader?.address ?? '';
+    return `${trader}|${trade.asset}|${trade.side}|${trade.size}|${trade.price}`;
+  }
 
+  /**
+   * Two layers, because the feed duplicates trades in two different ways:
+   *
+   * 1. the same fill delivered on both the `trades` and `orders_matched`
+   *    types, or replayed after a reconnect - same transaction hash, so the
+   *    window is generous (30s covers reconnect replay);
+   * 2. one order filled by several makers, reported once per fill with the
+   *    order's total size - different hashes, so only a short window (2s)
+   *    can tell it apart from a wallet genuinely repeating a trade.
+   */
+  private isDuplicateActivity(trade: ActivityTrade): boolean {
     const now = Date.now();
 
-    // Entries are inserted in time order and never refreshed, so expired ones
-    // are always at the front.
-    for (const [key, seenAt] of this.recentActivity) {
+    if (this.seenRecently(
+      this.recentActivity,
+      this.activityKey(trade),
+      this.config.activityDedupWindowMs ?? 30_000,
+      now,
+    )) return true;
+
+    return this.seenRecently(
+      this.recentActivityOrders,
+      this.activityOrderKey(trade),
+      this.config.activityFragmentWindowMs ?? 2_000,
+      now,
+    );
+  }
+
+  /**
+   * Whether `key` was already recorded in `seen` within `windowMs`, recording
+   * it otherwise. Entries are inserted in time order and never refreshed, so
+   * expired ones are always at the front and pruning is amortised O(1).
+   */
+  private seenRecently(
+    seen: Map<string, number>,
+    key: string,
+    windowMs: number,
+    now: number,
+  ): boolean {
+    if (windowMs <= 0) return false;
+
+    for (const [k, seenAt] of seen) {
       if (now - seenAt < windowMs) break;
-      this.recentActivity.delete(key);
+      seen.delete(k);
     }
 
-    const key = this.activityKey(trade);
-    if (this.recentActivity.has(key)) return true;
-
-    this.recentActivity.set(key, now);
+    if (seen.has(key)) return true;
+    seen.set(key, now);
 
     // Hard cap in case the feed is far busier than the window assumes.
-    while (this.recentActivity.size > RealtimeServiceV2.MAX_RECENT_ACTIVITY) {
-      const oldest = this.recentActivity.keys().next().value;
+    while (seen.size > RealtimeServiceV2.MAX_RECENT_ACTIVITY) {
+      const oldest = seen.keys().next().value;
       if (oldest === undefined) break;
-      this.recentActivity.delete(oldest);
+      seen.delete(oldest);
     }
 
     return false;
