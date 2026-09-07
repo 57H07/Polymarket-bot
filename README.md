@@ -2,11 +2,6 @@
 
 **The Ultimate Open-Source Automated Trading Bot for Polymarket**
 
-[![English](https://img.shields.io/badge/Language-English-blue)](README.md)
-[![Arabic](https://img.shields.io/badge/Language-Arabic-green)](README_AR.md)
-
-**Created by**: [@Mr_CryptoYT](https://x.com/Mr_CryptoYT)
-
 ## 🆕 What's New in v3.1 (January 2026)
 
 ### 🔴 **Professional-Grade Risk Management**
@@ -371,8 +366,6 @@ If something goes wrong:
 - **v1.0** (October 2025): Initial release
 
 ---
-
-**Created by**: [@Mr_CryptoYT](https://x.com/Mr_CryptoYT)
 
 **Support**: Open an issue on GitHub or contact via Twitter
 

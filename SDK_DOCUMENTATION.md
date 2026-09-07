@@ -1,16 +1,5 @@
 # @catalyst-team/poly-sdk
 
-[![npm version](https://img.shields.io/npm/v/@catalyst-team/poly-sdk.svg)](https://www.npmjs.com/package/@catalyst-team/poly-sdk)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-
-**Unified TypeScript SDK for Polymarket** - Trading, market data, smart money analysis, and on-chain operations.
-
-**Builder**: [@hhhx402](https://x.com/hhhx402) | **Project**: [Catalyst.fun](https://x.com/catalystdotfun)
-
-☕ **Buy Me a Coffee (Polygon):** `0x58d2ff253998bc2f3b8f5bdbe9c52cad7b022739`
-
-[中文文档](README.zh-CN.md)
-
 ---
 
 ## Table of Contents

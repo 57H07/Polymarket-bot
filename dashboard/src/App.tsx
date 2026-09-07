@@ -166,12 +166,12 @@ function App() {
           <span>
             BUILT BY{' '}
             <a
-              href="https://x.com/Mr_CryptoYT"
+              href="https://github.com/57H07/"
               target="_blank"
               rel="noopener noreferrer"
               className="text-purple-400 transition-colors hover:text-purple-300"
             >
-              @Mr_CryptoYT
+              @57H07
             </a>
           </span>
         </footer>
